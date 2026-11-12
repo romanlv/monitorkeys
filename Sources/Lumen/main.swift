@@ -2,7 +2,13 @@ import AppKit
 import LumenCore
 
 /// `Lumen --probe` lists displays and their channels and reads current levels. It writes nothing
-/// unless `--ddc-set <raw>` is also given, which writes that luminance to external monitors.
+/// unless `--ddc-set <raw>` (luminance) or `--volume-set <raw>` (speaker volume) is also given,
+/// which writes that raw value to external monitors.
+func argument(_ flag: String) -> String? {
+    guard let i = CommandLine.arguments.firstIndex(of: flag), i + 1 < CommandLine.arguments.count else { return nil }
+    return CommandLine.arguments[i + 1]
+}
+
 if CommandLine.arguments.contains("--probe") {
     let ids = DisplayInventory.online()
     let endpoints = BusLocator.externalEndpoints()
@@ -18,16 +24,29 @@ if CommandLine.arguments.contains("--probe") {
             if let ms = ProcessInfo.processInfo.environment["LUMEN_REPLY_MS"].flatMap(Int.init) { tuning.replyWaitMs = ms }
             if let ms = ProcessInfo.processInfo.environment["LUMEN_SETTLE_MS"].flatMap(Int.init) { tuning.settleMs = ms }
             if let n = ProcessInfo.processInfo.environment["LUMEN_READ_SENDS"].flatMap(Int.init) { tuning.readRequestSends = n }
-            if let bus = BusBacklight(endpoint: ep, tuning: tuning) {
+            if let n = ProcessInfo.processInfo.environment["LUMEN_SENDS"].flatMap(Int.init) { tuning.sendsPerValue = n }
+            let link = BusLink(endpoint: ep, tuning: tuning)
+            if let bus = BusBacklight(link: link) {
                 print("    DDC luminance: max=\(bus.maximum) level=\(bus.read().map { String(format: "%.3f", $0) } ?? "unreadable")")
-                if let i = CommandLine.arguments.firstIndex(of: "--ddc-set"), i + 1 < CommandLine.arguments.count,
-                   let raw = UInt16(CommandLine.arguments[i + 1]) {
-                    print("    write \(raw): \(bus.writeRawNow(min(raw, bus.maximum)) ? "accepted" : "failed")")
+                if let raw = argument("--ddc-set").flatMap(UInt16.init) {
+                    print("    write \(raw): \(link.writeNow(MCCS.Code.luminance, min(raw, bus.maximum)) ? "accepted" : "failed")")
                     usleep(100_000)
                     print("    read back: \(bus.read().map { String(format: "%.3f", $0) } ?? "unreadable")")
                 }
             } else {
                 print("    DDC endpoint found but luminance read failed → software dimming only")
+            }
+            if let speaker = BusSpeaker(link: link) {
+                print("    DDC speaker: max=\(speaker.maximum) volume=\(String(format: "%.3f", speaker.volume))"
+                      + " mute control=\(speaker.model.hasMuteControl) muted=\(speaker.muted)")
+                if let raw = argument("--volume-set").flatMap(UInt16.init) {
+                    print("    write volume \(raw): \(link.writeNow(MCCS.Code.speakerVolume, min(raw, speaker.maximum)) ? "accepted" : "failed")")
+                    usleep(100_000)
+                    speaker.resync()
+                    print("    read back: \(String(format: "%.3f", speaker.volume))")
+                }
+            } else {
+                print("    no DDC speaker volume")
             }
         } else {
             print("    no backlight channel → software dimming only")

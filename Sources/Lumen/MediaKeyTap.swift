@@ -2,26 +2,33 @@ import AppKit
 import ApplicationServices
 import LumenCore
 
-/// Takes over the keyboard brightness keys while the chosen display (see `KeyTargetMode`) is one
-/// Lumen controls. Otherwise (e.g. the built-in panel) the key passes through untouched, so macOS
-/// keeps handling it natively.
+/// Takes over the keyboard brightness and sound keys when they should act on something Lumen
+/// controls: brightness keys on the chosen external display (see `KeyTargetMode`), sound keys on
+/// the monitor speakers the Mac is playing through. Otherwise (built-in panel, speakers macOS can
+/// set itself) the key passes through untouched, so macOS keeps handling it natively.
 ///
 /// Needs Accessibility permission: an active event tap that can swallow events requires it.
-/// Only brightness key events are inspected; every other event is returned unchanged.
-final class BrightnessKeyTap {
-    /// Returns the coordinator that should receive keys for a display, or nil to let macOS handle them.
+/// Only media key events are inspected; every other event is returned unchanged.
+final class MediaKeyTap {
+    var brightnessKeys = false
+    var soundKeys = false
+    /// Returns the coordinator that should receive brightness keys for a display, or nil to let macOS handle them.
     var target: (CGDirectDisplayID) -> BlendCoordinator? = { _ in nil }
-    /// Which display the keys act on.
+    /// Returns the display whose speakers should receive the sound keys, or nil to let macOS handle them.
+    var speakerTarget: () -> BlendCoordinator? = { nil }
+    /// Which display the brightness keys act on.
     var mode: KeyTargetMode = .pointer
     /// Called after a key changed a display's lumen.
     var onChange: (BlendCoordinator) -> Void = { _ in }
+    /// Called after a key changed a display's speaker volume or mute.
+    var onSpeakerChange: (BlendCoordinator) -> Void = { _ in }
 
     private var port: CFMachPort?
     private var source: CFRunLoopSource?
     /// Presses we consumed, by key and by event shape, so only their matching releases are consumed.
     private var swallowed = Set<Swallowed>()
     private struct Swallowed: Hashable {
-        let key: BrightnessKey
+        let key: MediaKey
         let virtualKey: Bool
     }
 
@@ -73,36 +80,52 @@ final class BrightnessKeyTap {
             swallowed.removeAll()
             return pass
         case .keyDown, .keyUp:
-            guard let key = BrightnessKeyDecoder.decodeKeyDown(
+            guard let key = MediaKeyDecoder.decodeKeyDown(
                 virtualKey: event.getIntegerValueField(.keyboardEventKeycode)) else { return pass }
             return press(key, isDown: type == .keyDown, virtualKey: true, flags: event.flags) ? nil : pass
         default:
             guard type.rawValue == 14, // system-defined
                   let ns = NSEvent(cgEvent: event),
-                  let p = BrightnessKeyDecoder.decodeSystemDefined(subtype: ns.subtype.rawValue, data1: ns.data1)
+                  let p = MediaKeyDecoder.decodeSystemDefined(subtype: ns.subtype.rawValue, data1: ns.data1)
             else { return pass }
             return press(p.key, isDown: p.isDown, virtualKey: false, flags: event.flags) ? nil : pass
         }
     }
 
     /// Returns true when the event was consumed.
-    private func press(_ key: BrightnessKey, isDown: Bool, virtualKey: Bool, flags: CGEventFlags) -> Bool {
+    private func press(_ key: MediaKey, isDown: Bool, virtualKey: Bool, flags: CGEventFlags) -> Bool {
         let id = Swallowed(key: key, virtualKey: virtualKey)
         guard isDown else {
             // Swallow a release only if we swallowed its press, so macOS never sees half a keystroke.
             return swallowed.remove(id) != nil
         }
-        guard let display = mode.display(), let coordinator = target(display) else {
-            swallowed.remove(id)
-            return false
-        }
         let fine = flags.contains(.maskAlternate) && flags.contains(.maskShift)
-        coordinator.set(lumen: LumenStep.next(from: coordinator.lumen, key: key, fine: fine))
-        swallowed.insert(id)
+        let handled: Bool
+        switch key {
+        case .brightness(let direction):
+            handled = brightness(direction, fine: fine)
+        case .volume(let direction):
+            handled = speaker { $0.setVolume(LumenStep.next(from: $0.audibleVolume, key: direction, fine: fine)) }
+        case .mute:
+            handled = speaker { $0.toggleMute() }
+        }
+        if handled { swallowed.insert(id) } else { swallowed.remove(id) }
+        return handled
+    }
+
+    private func brightness(_ direction: StepDirection, fine: Bool) -> Bool {
+        guard brightnessKeys, let display = mode.display(), let coordinator = target(display) else { return false }
+        coordinator.set(lumen: LumenStep.next(from: coordinator.lumen, key: direction, fine: fine))
         onChange(coordinator)
         return true
     }
 
+    private func speaker(_ change: (BusSpeaker) -> Void) -> Bool {
+        guard soundKeys, let coordinator = speakerTarget(), let speaker = coordinator.speaker else { return false }
+        change(speaker)
+        onSpeakerChange(coordinator)
+        return true
+    }
 }
 
 enum KeyTargetMode: String, CaseIterable {
@@ -160,22 +183,24 @@ enum KeyTargetMode: String, CaseIterable {
 private func brightnessTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
                                    refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
     guard let refcon else { return Unmanaged.passUnretained(event) }
-    return Unmanaged<BrightnessKeyTap>.fromOpaque(refcon).takeUnretainedValue().handle(type, event)
+    return Unmanaged<MediaKeyTap>.fromOpaque(refcon).takeUnretainedValue().handle(type, event)
 }
 
-/// A small level indicator shown on the display whose brightness just changed, since macOS only
-/// draws its own indicator for displays it controls itself.
+/// A small level indicator shown on the display whose brightness or speaker volume just changed,
+/// since macOS only draws its own indicator for things it controls itself.
 final class LevelHUD {
     private var panel: NSPanel?
     private var bar: NSLevelIndicator?
+    private var icon: NSImageView?
     private var hideWork: DispatchWorkItem?
 
-    func show(level: Double, on display: CGDirectDisplayID) {
+    func show(level: Double, on display: CGDirectDisplayID, symbol: String = "sun.max.fill") {
         guard let screen = NSScreen.screens.first(where: {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == display
         }) else { return }
         let panel = self.panel ?? makePanel()
         bar?.doubleValue = level * 16
+        icon?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         let size = panel.frame.size
         panel.setFrameOrigin(NSPoint(x: screen.frame.midX - size.width / 2, y: screen.frame.minY + 140))
         panel.alphaValue = 1
@@ -222,6 +247,7 @@ final class LevelHUD {
         panel.contentView = background
         self.panel = panel
         self.bar = bar
+        self.icon = icon
         return panel
     }
 }

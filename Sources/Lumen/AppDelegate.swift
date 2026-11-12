@@ -14,7 +14,7 @@ struct Settings {
         nonmutating set { d.set(newValue, forKey: "backlightFloor") }
     }
     var sendsPerValue: Int {
-        get { d.object(forKey: "sendsPerValue") as? Int ?? 1 }
+        get { d.object(forKey: "sendsPerValue") as? Int ?? 2 }
         nonmutating set { d.set(newValue, forKey: "sendsPerValue") }
     }
     var settleMs: Int {
@@ -24,6 +24,10 @@ struct Settings {
     var brightnessKeys: Bool {
         get { d.object(forKey: "brightnessKeys") as? Bool ?? false }
         nonmutating set { d.set(newValue, forKey: "brightnessKeys") }
+    }
+    var soundKeys: Bool {
+        get { d.object(forKey: "soundKeys") as? Bool ?? false }
+        nonmutating set { d.set(newValue, forKey: "soundKeys") }
     }
     var keyTarget: KeyTargetMode {
         get { d.string(forKey: "keyTarget").flatMap(KeyTargetMode.init(rawValue:)) ?? .pointer }
@@ -69,7 +73,7 @@ enum DisplayInventory {
         let needed = ids.filter { kept[$0] == nil }
 
         // Buses already driven by a kept channel are off the table for the new ones.
-        let inUse = Set(reusable.compactMap { ($0.backlight as? BusBacklight)?.registryID })
+        let inUse = Set(reusable.compactMap(\.busID))
         let neededExternal = needed.filter { CGDisplayIsBuiltin($0) == 0 }
         let assigned = neededExternal.isEmpty ? [:] : BusLocator.assign(
             neededExternal, BusLocator.externalEndpoints().filter { !inUse.contains($0.registryID) })
@@ -77,12 +81,15 @@ enum DisplayInventory {
         return ids.map { id in
             if let c = kept[id] { return c }
             var backlight: BacklightChannel? = BuiltInBacklight(display: id)
+            var speaker: BusSpeaker?
             if backlight == nil, CGDisplayIsBuiltin(id) == 0, let ep = assigned[id] {
-                backlight = BusBacklight(endpoint: ep, tuning: settings.tuning)
+                let link = BusLink(endpoint: ep, tuning: settings.tuning)
+                backlight = BusBacklight(link: link)
+                speaker = BusSpeaker(link: link)
             }
             // A replacement takes over the gamma its predecessor left on the display.
             let old = previous[id]
-            let c = BlendCoordinator(display: id, name: name(of: id), backlight: backlight,
+            let c = BlendCoordinator(display: id, name: name(of: id), backlight: backlight, speaker: speaker,
                                      policy: settings.policy, dimmer: old?.dimmerLevel ?? 1)
             if let old { c.set(lumen: old.lumen) }
             return c
@@ -94,7 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let settings = Settings()
     private var statusItem: NSStatusItem!
     private var coordinators: [BlendCoordinator] = []
-    private let keyTap = BrightnessKeyTap()
+    private let keyTap = MediaKeyTap()
     private let hud = LevelHUD()
     private var trustPoll: Timer?
     private let scheduler = DayScheduler()
@@ -125,7 +132,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             scheduler.userAdjusted(c.display)
             hud.show(level: c.lumen, on: c.display)
         }
-        if settings.brightnessKeys { enableBrightnessKeys(prompt: true) }
+        // Sound keys act on monitor speakers only while the Mac plays through them and macOS can't set their volume.
+        keyTap.speakerTarget = { [unowned self] in speakerForCurrentOutput() }
+        keyTap.onSpeakerChange = { [unowned self] c in
+            guard let s = c.speaker else { return }
+            hud.show(level: s.audibleVolume, on: c.display,
+                     symbol: s.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+        }
+        keyTap.brightnessKeys = settings.brightnessKeys
+        keyTap.soundKeys = settings.soundKeys
+        if settings.brightnessKeys || settings.soundKeys { enableKeyTap(prompt: true) }
 
         scheduler.coordinators = { [unowned self] in coordinators }
         scheduler.start()
@@ -147,18 +163,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         scheduleWindow?.makeKeyAndOrderFront(nil)
     }
 
-    // MARK: brightness keys
+    // MARK: keys
 
-    private func enableBrightnessKeys(prompt: Bool) {
-        if BrightnessKeyTap.isTrusted, keyTap.start() { return }
-        if prompt, !BrightnessKeyTap.isTrusted { BrightnessKeyTap.promptForTrust() }
+    private var wantsKeyTap: Bool { settings.brightnessKeys || settings.soundKeys }
+
+    private func enableKeyTap(prompt: Bool) {
+        if MediaKeyTap.isTrusted, keyTap.start() { return }
+        if prompt, !MediaKeyTap.isTrusted { MediaKeyTap.promptForTrust() }
         // Permission is granted in System Settings while we keep running; start as soon as it lands
         // (and keep retrying if the tap still cannot be created).
         trustPoll?.invalidate()
         trustPoll = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
             guard let self else { return timer.invalidate() }
-            guard self.settings.brightnessKeys else { timer.invalidate(); self.trustPoll = nil; return }
-            guard BrightnessKeyTap.isTrusted, self.keyTap.start() else { return }
+            guard self.wantsKeyTap else { timer.invalidate(); self.trustPoll = nil; return }
+            guard MediaKeyTap.isTrusted, self.keyTap.start() else { return }
             timer.invalidate()
             self.trustPoll = nil
         }
@@ -169,16 +187,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             settings.keyTarget = mode
             keyTap.mode = mode
         }
-        let wasOn = settings.brightnessKeys
-        settings.brightnessKeys = mode != nil
-        if wasOn == settings.brightnessKeys { return }
-        if settings.brightnessKeys {
-            enableBrightnessKeys(prompt: true)
+        updateKeyTap { settings.brightnessKeys = mode != nil }
+    }
+
+    private func setSoundKeys(_ on: Bool) {
+        updateKeyTap { settings.soundKeys = on }
+    }
+
+    /// Applies a settings change, then starts the tap if a feature now needs it, or stops it if none does.
+    private func updateKeyTap(_ change: () -> Void) {
+        let wasWanted = wantsKeyTap
+        change()
+        keyTap.brightnessKeys = settings.brightnessKeys
+        keyTap.soundKeys = settings.soundKeys
+        if wasWanted == wantsKeyTap { return }
+        if wantsKeyTap {
+            enableKeyTap(prompt: true)
         } else {
             trustPoll?.invalidate()
             trustPoll = nil
             keyTap.stop()
         }
+    }
+
+    /// The display whose speakers the sound keys should drive right now, if any.
+    private func speakerForCurrentOutput() -> BlendCoordinator? {
+        guard let output = AudioOutput.current() else { return nil }
+        let candidates = coordinators.filter { $0.speaker != nil }
+        return SpeakerRouting.pick(outputName: output.name, viaDisplayCable: output.viaDisplayCable,
+                                   hasSystemVolume: output.hasSystemVolume,
+                                   monitors: candidates.map(\.name)).map { candidates[$0] }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -200,6 +238,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             menu.addItem(item)
         }
+        for c in coordinators {
+            guard let speaker = c.speaker else { continue }
+            let item = NSMenuItem()
+            item.view = SliderRow(title: "\(c.name) — speaker volume", value: speaker.volume) { [weak speaker] v in
+                speaker?.setVolume(v)
+            }
+            menu.addItem(item)
+            let mute = ClosureMenuItem(title: "Mute \(c.name)") { [weak speaker] in speaker?.toggleMute() }
+            mute.state = speaker.muted ? .on : .off
+            menu.addItem(mute)
+        }
         menu.addItem(.separator())
         let follow = ClosureMenuItem(title: "Adjust brightness through the day") { [unowned self] in scheduler.enabled.toggle() }
         follow.state = scheduler.enabled ? .on : .off
@@ -212,27 +261,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(ClosureMenuItem(title: "Day Schedule…") { [unowned self] in showScheduleWindow() })
         menu.addItem(.separator())
-        menu.addItem(choices("Software dimming below", [("Off", 0.0), ("20%", 0.2), ("30%", 0.3), ("40%", 0.4), ("50%", 0.5)],
-                             current: settings.dimmingStart) { [unowned self] v in settings.dimmingStart = v; updatePolicy() })
-        menu.addItem(choices("Backlight floor", [("0%", 0.0), ("10%", 0.1), ("20%", 0.2), ("30%", 0.3)],
-                             current: settings.backlightFloor) { [unowned self] v in settings.backlightFloor = v; updatePolicy() })
-        menu.addItem(choices("DDC sends per change", [("Once", 1), ("Twice", 2)],
-                             current: settings.sendsPerValue) { [unowned self] v in settings.sendsPerValue = v; updateTuning() })
-        menu.addItem(choices("DDC settle time", [("20 ms", 20), ("50 ms", 50), ("100 ms", 100)],
-                             current: settings.settleMs) { [unowned self] v in settings.settleMs = v; updateTuning() })
+        // Tuning for unusual monitors; the defaults suit most setups, so it stays out of the way.
+        let advanced = NSMenuItem(title: "Advanced", action: nil, keyEquivalent: "")
+        let tuning = NSMenu()
+        tuning.addItem(choices("Software dimming below", [("Off", 0.0), ("20%", 0.2), ("30%", 0.3), ("40%", 0.4), ("50%", 0.5)],
+                               current: settings.dimmingStart) { [unowned self] v in settings.dimmingStart = v; updatePolicy() })
+        tuning.addItem(choices("Backlight floor", [("0%", 0.0), ("10%", 0.1), ("20%", 0.2), ("30%", 0.3)],
+                               current: settings.backlightFloor) { [unowned self] v in settings.backlightFloor = v; updatePolicy() })
+        tuning.addItem(choices("DDC sends per change", [("Once", 1), ("Twice", 2)],
+                               current: settings.sendsPerValue) { [unowned self] v in settings.sendsPerValue = v; updateTuning() })
+        tuning.addItem(choices("DDC settle time", [("20 ms", 20), ("50 ms", 50), ("100 ms", 100)],
+                               current: settings.settleMs) { [unowned self] v in settings.settleMs = v; updateTuning() })
+        advanced.submenu = tuning
         let current: KeyTargetMode? = settings.brightnessKeys ? settings.keyTarget : nil
         menu.addItem(choices("Brightness keys control external display",
                              [("Off", nil)] + KeyTargetMode.allCases.map { ($0.title, Optional($0)) },
                              current: current) { [unowned self] mode in setBrightnessKeys(mode) })
-        if settings.brightnessKeys && !keyTap.isRunning {
+        let sound = ClosureMenuItem(title: "Sound keys control monitor speakers") { [unowned self] in
+            setSoundKeys(!settings.soundKeys)
+        }
+        sound.state = settings.soundKeys ? .on : .off
+        menu.addItem(sound)
+        if wantsKeyTap && !keyTap.isRunning {
             let note = NSMenuItem(title: "Waiting for Accessibility permission…", action: nil, keyEquivalent: "")
             note.isEnabled = false
             menu.addItem(note)
         }
         menu.addItem(ClosureMenuItem(title: "Re-read hardware levels") { [unowned self] in
             refreshDisplays(reprobe: true)
-            coordinators.forEach { $0.resync() }
+            coordinators.forEach { $0.resync(); $0.speaker?.resync() }
         })
+        menu.addItem(advanced)
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem(title: "Quit Lumen") { NSApp.terminate(nil) })
     }
@@ -252,7 +311,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updatePolicy() { coordinators.forEach { $0.policy = settings.policy } }
     private func updateTuning() {
-        coordinators.compactMap { $0.backlight as? BusBacklight }.forEach { $0.tuning = settings.tuning }
+        // A monitor's backlight and speaker share one link.
+        coordinators.compactMap { ($0.backlight as? BusBacklight)?.link ?? $0.speaker?.link }
+            .forEach { $0.tuning = settings.tuning }
     }
 
     /// Adds coordinators for new displays, drops those for removed ones, and keeps the rest as they

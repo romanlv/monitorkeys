@@ -8,6 +8,8 @@ final class BlendCoordinator {
     let display: CGDirectDisplayID
     let name: String
     let backlight: BacklightChannel?
+    /// The monitor's speakers, when it reports a DDC speaker volume. Rides along on the same bus.
+    let speaker: BusSpeaker?
     private let dimmer: GammaDimmer
     private var table: RampTable
     private var written: ChannelLevels
@@ -20,11 +22,12 @@ final class BlendCoordinator {
     /// Starts from what the hardware reports now, so creating a coordinator writes nothing.
     /// `dimmer` is the gamma level already on the display (full, unless a previous coordinator
     /// for the same display left it dimmed).
-    init(display: CGDirectDisplayID, name: String, backlight: BacklightChannel?, policy: RampPolicy,
-         dimmer currentDimmer: Double = 1) {
+    init(display: CGDirectDisplayID, name: String, backlight: BacklightChannel?, speaker: BusSpeaker? = nil,
+         policy: RampPolicy, dimmer currentDimmer: Double = 1) {
         self.display = display
         self.name = name
         self.backlight = backlight
+        self.speaker = speaker
         self.dimmer = GammaDimmer(display: display)
         self.policy = policy
         let table = RampTable(policy: backlight == nil ? .softwareOnly(dimmerFloor: policy.dimmerFloor) : policy)
@@ -39,6 +42,9 @@ final class BlendCoordinator {
 
     /// An external display that has no backlight channel yet; worth probing for DDC again.
     var needsProbe: Bool { backlight == nil && CGDisplayIsBuiltin(display) == 0 }
+
+    /// The DDC bus this display's channels use, if any.
+    var busID: UInt64? { (backlight as? BusBacklight)?.link.registryID ?? speaker?.link.registryID }
 
     func set(lumen value: Double) {
         lumen = min(max(value, 0), 1)

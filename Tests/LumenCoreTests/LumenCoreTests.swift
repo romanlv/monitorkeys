@@ -44,6 +44,21 @@ import Foundation
         #expect(MCCS.parseGetVCPReply(reply, code: 0x10) == nil)
     }
 
+    @Test func distinguishesUnsupportedCode() {
+        let reply: [UInt8] = [0x6E, 0x88, 0x02, 0x01, 0x62, 0x00, 0x00, 0x00, 0x00, 0x00, 0xD7]
+        #expect(MCCS.parseGetVCP(reply, code: 0x62) == .unsupported)
+        #expect(MCCS.parseGetVCPReply(reply, code: 0x62) == nil)
+    }
+
+    @Test func parsesSpeakerVolume() {
+        let reply: [UInt8] = [0x6E, 0x88, 0x02, 0x00, 0x62, 0x00, 0x00, 0x64, 0x00, 0x1E, 0xAC]
+        #expect(MCCS.parseGetVCP(reply, code: MCCS.Code.speakerVolume) == .value(.init(current: 30, maximum: 100)))
+    }
+
+    @Test func muteWritePacket() {
+        #expect(MCCS.setVCP(code: MCCS.Code.audioMute, value: MCCS.MuteValue.muted) == [0x84, 0x03, 0x8D, 0x00, 0x01, 0x34])
+    }
+
     @Test func rejectsWrongCode() {
         let reply: [UInt8] = [0x6E, 0x88, 0x02, 0x00, 0x12, 0x00, 0x00, 0x64, 0x00, 0x32, 0xF0]
         #expect(MCCS.parseGetVCPReply(reply, code: 0x10) == nil)
@@ -101,29 +116,38 @@ import Foundation
     }
 }
 
-@Suite struct BrightnessKeyTests {
+@Suite struct MediaKeyTests {
     private func data1(code: Int, state: Int, repeat r: Bool = false) -> Int {
         (code << 16) | (state << 8) | (r ? 1 : 0)
     }
 
     @Test func decodesBrightnessUpDown() {
-        #expect(BrightnessKeyDecoder.decodeSystemDefined(subtype: 8, data1: data1(code: 2, state: 0x0A))
-                == .init(key: .up, isDown: true, isRepeat: false))
-        #expect(BrightnessKeyDecoder.decodeSystemDefined(subtype: 8, data1: data1(code: 3, state: 0x0B))
-                == .init(key: .down, isDown: false, isRepeat: false))
-        #expect(BrightnessKeyDecoder.decodeSystemDefined(subtype: 8, data1: data1(code: 3, state: 0x0A, repeat: true))?.isRepeat == true)
+        #expect(MediaKeyDecoder.decodeSystemDefined(subtype: 8, data1: data1(code: 2, state: 0x0A))
+                == .init(key: .brightness(.up), isDown: true, isRepeat: false))
+        #expect(MediaKeyDecoder.decodeSystemDefined(subtype: 8, data1: data1(code: 3, state: 0x0B))
+                == .init(key: .brightness(.down), isDown: false, isRepeat: false))
+        #expect(MediaKeyDecoder.decodeSystemDefined(subtype: 8, data1: data1(code: 3, state: 0x0A, repeat: true))?.isRepeat == true)
+    }
+
+    @Test func decodesSoundKeys() {
+        #expect(MediaKeyDecoder.decodeSystemDefined(subtype: 8, data1: data1(code: 0, state: 0x0A))?.key == .volume(.up))
+        #expect(MediaKeyDecoder.decodeSystemDefined(subtype: 8, data1: data1(code: 1, state: 0x0B))?.key == .volume(.down))
+        #expect(MediaKeyDecoder.decodeSystemDefined(subtype: 8, data1: data1(code: 7, state: 0x0A))?.key == .mute)
+        #expect(MediaKeyDecoder.decodeKeyDown(virtualKey: 0x48) == .volume(.up))
+        #expect(MediaKeyDecoder.decodeKeyDown(virtualKey: 0x49) == .volume(.down))
+        #expect(MediaKeyDecoder.decodeKeyDown(virtualKey: 0x4A) == .mute)
     }
 
     @Test func ignoresOtherKeysAndSubtypes() {
-        #expect(BrightnessKeyDecoder.decodeSystemDefined(subtype: 8, data1: data1(code: 0, state: 0x0A)) == nil) // volume up
-        #expect(BrightnessKeyDecoder.decodeSystemDefined(subtype: 8, data1: data1(code: 7, state: 0x0A)) == nil) // mute
-        #expect(BrightnessKeyDecoder.decodeSystemDefined(subtype: 7, data1: data1(code: 2, state: 0x0A)) == nil)
+        #expect(MediaKeyDecoder.decodeSystemDefined(subtype: 8, data1: data1(code: 16, state: 0x0A)) == nil) // play
+        #expect(MediaKeyDecoder.decodeSystemDefined(subtype: 8, data1: data1(code: 0, state: 0x0C)) == nil)
+        #expect(MediaKeyDecoder.decodeSystemDefined(subtype: 7, data1: data1(code: 2, state: 0x0A)) == nil)
     }
 
     @Test func decodesVirtualKeys() {
-        #expect(BrightnessKeyDecoder.decodeKeyDown(virtualKey: 144) == .up)
-        #expect(BrightnessKeyDecoder.decodeKeyDown(virtualKey: 145) == .down)
-        #expect(BrightnessKeyDecoder.decodeKeyDown(virtualKey: 122) == nil) // F1 as a plain function key
+        #expect(MediaKeyDecoder.decodeKeyDown(virtualKey: 144) == .brightness(.up))
+        #expect(MediaKeyDecoder.decodeKeyDown(virtualKey: 145) == .brightness(.down))
+        #expect(MediaKeyDecoder.decodeKeyDown(virtualKey: 122) == nil) // F1 as a plain function key
     }
 
     @Test func stepsOnSixteenthGrid() {
@@ -255,5 +279,55 @@ import Foundation
         let sun = SunTimes(sunrise: 210, sunset: 30)
         #expect(plan.level(atMinute: 18 * 60, sun: sun) == 1)
         #expect(abs(plan.level(atMinute: 120, sun: sun) - 0.6) < 1e-9) // 02:00, between the ramps
+    }
+}
+
+@Suite struct SpeakerTests {
+    @Test func muteControlIsUsedWhenPresent() {
+        var m = SpeakerModel(volume: 0.4, muted: false, hasMuteControl: true)
+        #expect(m.toggleMute() == [.mute(true)])
+        #expect(m.audibleVolume == 0 && m.volume == 0.4)
+        #expect(m.toggleMute() == [.mute(false)])
+    }
+
+    @Test func muteFallsBackToZeroVolume() {
+        var m = SpeakerModel(volume: 0.4, muted: false, hasMuteControl: false)
+        #expect(m.setMuted(true) == [.volume(0)])
+        #expect(m.setMuted(true) == [])
+        #expect(m.setMuted(false) == [.volume(0.4)])
+    }
+
+    @Test func changingVolumeUnmutes() {
+        var a = SpeakerModel(volume: 0.4, muted: true, hasMuteControl: true)
+        #expect(a.setVolume(0.5) == [.volume(0.5), .mute(false)]) // level first, so the old level never plays
+        #expect(!a.muted)
+        var b = SpeakerModel(volume: 0.4, muted: true, hasMuteControl: false)
+        #expect(b.setVolume(0.5) == [.volume(0.5)])
+        #expect(!b.muted)
+    }
+
+    @Test func volumeClamps() {
+        var m = SpeakerModel(volume: 2, muted: false, hasMuteControl: false)
+        #expect(m.volume == 1)
+        #expect(m.setVolume(-1) == [.volume(0)])
+    }
+
+    @Test func routingLeavesSystemControlledOutputsToMacOS() {
+        #expect(SpeakerRouting.pick(outputName: "LG ULTRAWIDE", viaDisplayCable: true, hasSystemVolume: true,
+                                    monitors: ["LG ULTRAWIDE"]) == nil)
+    }
+
+    @Test func routingMatchesByName() {
+        #expect(SpeakerRouting.pick(outputName: "lg ultrawide", viaDisplayCable: true, hasSystemVolume: false,
+                                    monitors: ["DELL U2720Q", "LG ULTRAWIDE"]) == 1)
+    }
+
+    @Test func routingFallsBackToTheOnlyMonitorOnDisplayCable() {
+        #expect(SpeakerRouting.pick(outputName: "Monitor audio", viaDisplayCable: true, hasSystemVolume: false,
+                                    monitors: ["LG ULTRAWIDE"]) == 0)
+        #expect(SpeakerRouting.pick(outputName: "Monitor audio", viaDisplayCable: true, hasSystemVolume: false,
+                                    monitors: ["A", "B"]) == nil)
+        #expect(SpeakerRouting.pick(outputName: "USB DAC", viaDisplayCable: false, hasSystemVolume: false,
+                                    monitors: ["LG ULTRAWIDE"]) == nil)
     }
 }

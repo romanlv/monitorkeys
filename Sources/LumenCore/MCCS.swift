@@ -21,6 +21,22 @@ public enum MCCS {
     public enum Code {
         /// Luminance (backlight).
         public static let luminance: UInt8 = 0x10
+        /// Audio: speaker volume.
+        public static let speakerVolume: UInt8 = 0x62
+        /// Audio mute (low byte 1 = muted, 2 = not muted; the high byte is screen blanking, left at 0).
+        public static let audioMute: UInt8 = 0x8D
+    }
+
+    public enum MuteValue {
+        public static let muted: UInt16 = 1
+        public static let unmuted: UInt16 = 2
+    }
+
+    /// Outcome of a valid Get VCP reply.
+    public enum Reply: Equatable, Sendable {
+        case value(Reading)
+        /// The display answered, saying it does not implement this code.
+        case unsupported
     }
 
     public struct Reading: Equatable, Sendable {
@@ -45,6 +61,12 @@ public enum MCCS {
     /// Parse a Get VCP reply. Accepts a buffer with leading or trailing junk, but only a frame
     /// with a valid checksum, a zero result code and the requested VCP code.
     public static func parseGetVCPReply(_ bytes: [UInt8], code: UInt8) -> Reading? {
+        if case .value(let r)? = parseGetVCP(bytes, code: code) { return r }
+        return nil
+    }
+
+    /// Like `parseGetVCPReply`, but tells "unsupported code" apart from "no valid reply".
+    public static func parseGetVCP(_ bytes: [UInt8], code: UInt8) -> Reply? {
         // Frame: 6E 88 02 rc code type maxH maxL curH curL chk
         let frameLength = 11
         guard bytes.count >= frameLength else { return nil }
@@ -60,9 +82,9 @@ public enum MCCS {
             var canonical = Array(f[0 ..< 10])
             canonical[1] = 0x88
             guard xor(canonical, seed: replyChecksumSeed) == f[10] else { continue }
-            guard f[3] == 0x00 else { return nil } // display reported "unsupported VCP code"
-            return Reading(current: UInt16(f[8]) << 8 | UInt16(f[9]),
-                           maximum: UInt16(f[6]) << 8 | UInt16(f[7]))
+            guard f[3] == 0x00 else { return .unsupported }
+            return .value(Reading(current: UInt16(f[8]) << 8 | UInt16(f[9]),
+                                  maximum: UInt16(f[6]) << 8 | UInt16(f[7])))
         }
         return nil
     }
