@@ -11,9 +11,22 @@ A small macOS menu-bar app for external monitors on Apple Silicon:
 - **Day schedule:** brightness follows sunrise and sunset, with Day, Evening and Night levels and a
   bedtime. A manual change holds until the next transition.
 
+## Install
+
+1. Download `Lumen.zip` from [Releases](../../releases/latest).
+2. Unzip it and move `Lumen.app` to `/Applications`.
+3. The app isn't notarized, so clear the download flag once before opening it:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Lumen.app
+open /Applications/Lumen.app
+```
+
+Requires macOS 14+ on Apple Silicon.
+
 ## Build
 
-Requires macOS 14+ and Swift 6.
+Requires Swift 6.
 
 ```sh
 scripts/make-signing-cert.sh   # optional, once: local signing so Accessibility permission survives rebuilds
