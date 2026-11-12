@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 import IOKit
-import LumenCore
+import MonitorKeysCore
 
 /// Timing knobs for the display bus. Monitors differ a lot; these are user-tunable.
 struct BusTuning: Equatable {

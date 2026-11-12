@@ -2,14 +2,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "Lumen",
+    name: "MonitorKeys",
     platforms: [.macOS(.v14)],
     targets: [
         // Pure logic: the lumen ramp and the MCCS packet codec. No hardware access.
-        .target(name: "LumenCore"),
+        .target(name: "MonitorKeysCore"),
         // The menu-bar app: display discovery, channels, UI.
-        .executableTarget(name: "Lumen", dependencies: ["LumenCore"]),
-        .testTarget(name: "LumenCoreTests", dependencies: ["LumenCore"]),
+        .executableTarget(name: "MonitorKeys", dependencies: ["MonitorKeysCore"]),
+        .testTarget(name: "MonitorKeysCoreTests", dependencies: ["MonitorKeysCore"]),
     ],
     swiftLanguageModes: [.v5]
 )

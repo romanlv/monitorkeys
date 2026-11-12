@@ -1,7 +1,7 @@
 import AppKit
-import LumenCore
+import MonitorKeysCore
 
-/// `Lumen --probe` lists displays and their channels and reads current levels. It writes nothing
+/// `MonitorKeys --probe` lists displays and their channels and reads current levels. It writes nothing
 /// unless `--ddc-set <raw>` (luminance) or `--volume-set <raw>` (speaker volume) is also given,
 /// which writes that raw value to external monitors.
 func argument(_ flag: String) -> String? {
@@ -21,10 +21,10 @@ if CommandLine.arguments.contains("--probe") {
             print("    built-in backlight: \(b.read().map { String(format: "%.3f", $0) } ?? "unreadable")")
         } else if !builtIn, let ep = assigned[id] {
             var tuning = BusTuning()
-            if let ms = ProcessInfo.processInfo.environment["LUMEN_REPLY_MS"].flatMap(Int.init) { tuning.replyWaitMs = ms }
-            if let ms = ProcessInfo.processInfo.environment["LUMEN_SETTLE_MS"].flatMap(Int.init) { tuning.settleMs = ms }
-            if let n = ProcessInfo.processInfo.environment["LUMEN_READ_SENDS"].flatMap(Int.init) { tuning.readRequestSends = n }
-            if let n = ProcessInfo.processInfo.environment["LUMEN_SENDS"].flatMap(Int.init) { tuning.sendsPerValue = n }
+            if let ms = ProcessInfo.processInfo.environment["MONITORKEYS_REPLY_MS"].flatMap(Int.init) { tuning.replyWaitMs = ms }
+            if let ms = ProcessInfo.processInfo.environment["MONITORKEYS_SETTLE_MS"].flatMap(Int.init) { tuning.settleMs = ms }
+            if let n = ProcessInfo.processInfo.environment["MONITORKEYS_READ_SENDS"].flatMap(Int.init) { tuning.readRequestSends = n }
+            if let n = ProcessInfo.processInfo.environment["MONITORKEYS_SENDS"].flatMap(Int.init) { tuning.sendsPerValue = n }
             let link = BusLink(endpoint: ep, tuning: tuning)
             if let bus = BusBacklight(link: link) {
                 print("    DDC luminance: max=\(bus.maximum) level=\(bus.read().map { String(format: "%.3f", $0) } ?? "unreadable")")
@@ -55,6 +55,18 @@ if CommandLine.arguments.contains("--probe") {
     exit(0)
 }
 
+/// Brings settings over from the app's previous name (bundle id dev.ourapp.lumen), once.
+func migrateSettingsFromOldName() {
+    let d = UserDefaults.standard
+    guard !d.bool(forKey: "migratedFromOldName") else { return }
+    for (key, value) in UserDefaults.standard.persistentDomain(forName: "dev.ourapp.lumen") ?? [:]
+    where d.object(forKey: key) == nil {
+        d.set(value, forKey: key)
+    }
+    d.set(true, forKey: "migratedFromOldName")
+}
+
+migrateSettingsFromOldName()
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

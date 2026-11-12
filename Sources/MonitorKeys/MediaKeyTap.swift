@@ -1,8 +1,8 @@
 import AppKit
 import ApplicationServices
-import LumenCore
+import MonitorKeysCore
 
-/// Takes over the keyboard brightness and sound keys when they should act on something Lumen
+/// Takes over the keyboard brightness and sound keys when they should act on something MonitorKeys
 /// controls: brightness keys on the chosen external display (see `KeyTargetMode`), sound keys on
 /// the monitor speakers the Mac is playing through. Otherwise (built-in panel, speakers macOS can
 /// set itself) the key passes through untouched, so macOS keeps handling it natively.
@@ -105,7 +105,7 @@ final class MediaKeyTap {
         case .brightness(let direction):
             handled = brightness(direction, fine: fine)
         case .volume(let direction):
-            handled = speaker { $0.setVolume(LumenStep.next(from: $0.audibleVolume, key: direction, fine: fine)) }
+            handled = speaker { $0.setVolume(LevelStep.next(from: $0.audibleVolume, key: direction, fine: fine)) }
         case .mute:
             handled = speaker { $0.toggleMute() }
         }
@@ -115,7 +115,7 @@ final class MediaKeyTap {
 
     private func brightness(_ direction: StepDirection, fine: Bool) -> Bool {
         guard brightnessKeys, let display = mode.display(), let coordinator = target(display) else { return false }
-        coordinator.set(lumen: LumenStep.next(from: coordinator.lumen, key: direction, fine: fine))
+        coordinator.set(lumen: LevelStep.next(from: coordinator.lumen, key: direction, fine: fine))
         onChange(coordinator)
         return true
     }

@@ -56,7 +56,7 @@ public enum MediaKeyDecoder {
     }
 }
 
-public enum LumenStep {
+public enum LevelStep {
     /// Moves one notch on a 16-step grid (64 with `fine`), snapping off-grid values to the next notch.
     public static func next(from value: Double, key: StepDirection, fine: Bool) -> Double {
         let steps = fine ? 64.0 : 16.0

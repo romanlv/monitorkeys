@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import LumenCore
+@testable import MonitorKeysCore
 
 @Suite struct MCCSTests {
     @Test func setLuminancePacketMatchesSpecLayout() {
@@ -151,19 +151,19 @@ import Foundation
     }
 
     @Test func stepsOnSixteenthGrid() {
-        #expect(LumenStep.next(from: 0.5, key: .up, fine: false) == 9.0 / 16)
-        #expect(LumenStep.next(from: 0.5, key: .down, fine: false) == 7.0 / 16)
+        #expect(LevelStep.next(from: 0.5, key: .up, fine: false) == 9.0 / 16)
+        #expect(LevelStep.next(from: 0.5, key: .down, fine: false) == 7.0 / 16)
     }
 
     @Test func snapsOffGridValues() {
-        #expect(LumenStep.next(from: 0.63, key: .up, fine: false) == 11.0 / 16)
-        #expect(LumenStep.next(from: 0.63, key: .down, fine: false) == 10.0 / 16)
+        #expect(LevelStep.next(from: 0.63, key: .up, fine: false) == 11.0 / 16)
+        #expect(LevelStep.next(from: 0.63, key: .down, fine: false) == 10.0 / 16)
     }
 
     @Test func fineStepsAndClamping() {
-        #expect(LumenStep.next(from: 0.5, key: .up, fine: true) == 33.0 / 64)
-        #expect(LumenStep.next(from: 1, key: .up, fine: false) == 1)
-        #expect(LumenStep.next(from: 0, key: .down, fine: false) == 0)
+        #expect(LevelStep.next(from: 0.5, key: .up, fine: true) == 33.0 / 64)
+        #expect(LevelStep.next(from: 1, key: .up, fine: false) == 1)
+        #expect(LevelStep.next(from: 0, key: .down, fine: false) == 0)
     }
 }
 

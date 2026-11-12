@@ -1,6 +1,6 @@
 import AppKit
 import SwiftUI
-import LumenCore
+import MonitorKeysCore
 
 /// Persisted user settings.
 struct Settings {
@@ -293,7 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         })
         menu.addItem(advanced)
         menu.addItem(.separator())
-        menu.addItem(ClosureMenuItem(title: "Quit Lumen") { NSApp.terminate(nil) })
+        menu.addItem(ClosureMenuItem(title: "Quit MonitorKeys") { NSApp.terminate(nil) })
     }
 
     private func choices<T: Equatable>(_ title: String, _ options: [(String, T)], current: T,

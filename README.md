@@ -1,4 +1,4 @@
-# Lumen
+# MonitorKeys
 
 A small macOS menu-bar app for external monitors on Apple Silicon:
 
@@ -13,16 +13,19 @@ A small macOS menu-bar app for external monitors on Apple Silicon:
 
 ## Install
 
-1. Download `Lumen.zip` from [Releases](../../releases/latest).
-2. Unzip it and move `Lumen.app` to `/Applications`.
+1. Download `MonitorKeys.zip` from [Releases](../../releases/latest).
+2. Unzip it and move `MonitorKeys.app` to `/Applications`.
 3. The app isn't notarized, so clear the download flag once before opening it:
 
 ```sh
-xattr -dr com.apple.quarantine /Applications/Lumen.app
-open /Applications/Lumen.app
+xattr -dr com.apple.quarantine /Applications/MonitorKeys.app
+open /Applications/MonitorKeys.app
 ```
 
 Requires macOS 14+ on Apple Silicon.
+
+Upgrading from 0.1 (when the app was called Lumen): your settings carry over. Delete `Lumen.app`,
+and grant Accessibility permission again to MonitorKeys.
 
 ## Build
 
@@ -30,8 +33,8 @@ Requires Swift 6.
 
 ```sh
 scripts/make-signing-cert.sh   # optional, once: local signing so Accessibility permission survives rebuilds
-scripts/build-app.sh           # → build/Lumen.app
-open build/Lumen.app
+scripts/build-app.sh           # → build/MonitorKeys.app
+open build/MonitorKeys.app
 swift test
 ```
 
@@ -40,12 +43,12 @@ The keyboard features need Accessibility permission (System Settings → Privacy
 ## Diagnostics
 
 ```sh
-.build/release/Lumen --probe                    # list displays, read backlight and speaker levels
-.build/release/Lumen --probe --ddc-set 50       # write raw luminance
-.build/release/Lumen --probe --volume-set 10    # write raw speaker volume
+.build/release/MonitorKeys --probe                    # list displays, read backlight and speaker levels
+.build/release/MonitorKeys --probe --ddc-set 50       # write raw luminance
+.build/release/MonitorKeys --probe --volume-set 10    # write raw speaker volume
 ```
 
-Bus timing can be overridden with the `LUMEN_SENDS`, `LUMEN_SETTLE_MS`, `LUMEN_REPLY_MS` and `LUMEN_READ_SENDS`
+Bus timing can be overridden with the `MONITORKEYS_SENDS`, `MONITORKEYS_SETTLE_MS`, `MONITORKEYS_REPLY_MS` and `MONITORKEYS_READ_SENDS`
 environment variables. The menu's **Advanced** submenu has the same knobs.
 
 ## Notes

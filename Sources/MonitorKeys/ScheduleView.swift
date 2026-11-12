@@ -1,5 +1,5 @@
 import SwiftUI
-import LumenCore
+import MonitorKeysCore
 
 /// The "Day schedule" window: three levels, two times, a location, and the resulting curve.
 struct ScheduleView: View {
@@ -151,7 +151,7 @@ struct ScheduleView: View {
             DispatchQueue.main.async {
                 busy = false
                 guard let coordinate else {
-                    problem = "Location unavailable. Allow Lumen in System Settings → Privacy & Security → Location Services, or search for a city."
+                    problem = "Location unavailable. Allow MonitorKeys in System Settings → Privacy & Security → Location Services, or search for a city."
                     return
                 }
                 scheduler.place = Place(name: "Current location", latitude: coordinate.latitude,

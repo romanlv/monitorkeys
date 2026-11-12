@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 import os
 
-let log = Logger(subsystem: "dev.ourapp.lumen", category: "channels")
+let log = Logger(subsystem: "dev.ourapp.monitorkeys", category: "channels")
 
 /// A hardware brightness control, 0...1.
 protocol BacklightChannel: AnyObject {

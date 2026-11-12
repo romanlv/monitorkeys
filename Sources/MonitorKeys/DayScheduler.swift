@@ -2,7 +2,7 @@ import AppKit
 import CoreLocation
 import MapKit
 import Observation
-import LumenCore
+import MonitorKeysCore
 
 struct Place: Codable, Equatable {
     var name: String
@@ -25,7 +25,7 @@ final class DayScheduler {
 
     @ObservationIgnored var coordinators: () -> [BlendCoordinator] = { [] }
     @ObservationIgnored private var timer: Timer?
-    /// Lumen each display was last moved to by the schedule, to notice changes made elsewhere.
+    /// The lumen level each display was last moved to by the schedule, to notice changes made elsewhere.
     @ObservationIgnored private var scheduled: [CGDirectDisplayID: Double] = [:]
     @ObservationIgnored private let defaults = UserDefaults.standard
 

@@ -1,6 +1,6 @@
 import Foundation
 import IOKit
-import LumenCore
+import MonitorKeysCore
 
 /// One external monitor's DDC/CI connection. Every control on that monitor (backlight, speaker)
 /// goes through the same link, so bus transactions never overlap.
@@ -13,7 +13,7 @@ final class BusLink {
     private var service: CFTypeRef { endpoint.service }
     /// Which bus this link drives (see `BusEndpoint.registryID`).
     var registryID: UInt64 { endpoint.registryID }
-    private let queue = DispatchQueue(label: "dev.ourapp.lumen.bus")
+    private let queue = DispatchQueue(label: "dev.ourapp.monitorkeys.bus")
     private let lock = NSLock()
     private var pending: [(code: UInt8, value: UInt16)] = []
     private var draining = false

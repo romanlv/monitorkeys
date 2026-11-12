@@ -1,6 +1,6 @@
 import CoreGraphics
 import Foundation
-import LumenCore
+import MonitorKeysCore
 
 /// Owns one display: turns a lumen value into backlight + dimmer writes, and only writes a channel
 /// whose level actually changed.
