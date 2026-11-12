@@ -1,0 +1,84 @@
+import CoreGraphics
+import Foundation
+import LumenCore
+
+/// Owns one display: turns a lumen value into backlight + dimmer writes, and only writes a channel
+/// whose level actually changed.
+final class BlendCoordinator {
+    let display: CGDirectDisplayID
+    let name: String
+    let backlight: BacklightChannel?
+    private let dimmer: GammaDimmer
+    private var table: RampTable
+    private var written: ChannelLevels
+    private(set) var lumen: Double
+
+    var policy: RampPolicy {
+        didSet { table = RampTable(policy: effective(policy)); apply() }
+    }
+
+    /// Starts from what the hardware reports now, so creating a coordinator writes nothing.
+    /// `dimmer` is the gamma level already on the display (full, unless a previous coordinator
+    /// for the same display left it dimmed).
+    init(display: CGDirectDisplayID, name: String, backlight: BacklightChannel?, policy: RampPolicy,
+         dimmer currentDimmer: Double = 1) {
+        self.display = display
+        self.name = name
+        self.backlight = backlight
+        self.dimmer = GammaDimmer(display: display)
+        self.policy = policy
+        let table = RampTable(policy: backlight == nil ? .softwareOnly(dimmerFloor: policy.dimmerFloor) : policy)
+        self.table = table
+        let current = ChannelLevels(backlight: backlight?.read() ?? 1, dimmer: currentDimmer)
+        self.written = current
+        self.lumen = table.lumen(for: current)
+    }
+
+    /// Gamma level this coordinator last put on the display.
+    var dimmerLevel: Double { written.dimmer }
+
+    /// An external display that has no backlight channel yet; worth probing for DDC again.
+    var needsProbe: Bool { backlight == nil && CGDisplayIsBuiltin(display) == 0 }
+
+    func set(lumen value: Double) {
+        lumen = min(max(value, 0), 1)
+        apply()
+    }
+
+    /// Re-apply the dimmer after something outside our control reset the gamma (wake, reconfiguration).
+    func reassertDimmer() {
+        if written.dimmer < 1 { dimmer.write(written.dimmer) }
+    }
+
+    /// Pick up a backlight change made elsewhere (monitor buttons, macOS brightness keys).
+    /// Returns true when the hardware level had moved away from what we last wrote.
+    @discardableResult
+    func resync() -> Bool {
+        guard let level = backlight?.read() else { return false }
+        let moved = abs(level - written.backlight) > 0.01
+        written.backlight = level
+        if moved, written.dimmer < 1 {
+            // Someone else is adjusting brightness: stop dimming on top of their choice.
+            dimmer.write(1)
+            written.dimmer = 1
+        }
+        lumen = table.lumen(for: written)
+        return moved
+    }
+
+    private func apply() {
+        let target = table.levels(forLumen: lumen)
+        if let backlight, abs(target.backlight - written.backlight) > 0.0005 {
+            backlight.write(target.backlight)
+            written.backlight = target.backlight
+        }
+        if abs(target.dimmer - written.dimmer) > 0.0005 {
+            dimmer.write(target.dimmer)
+            written.dimmer = target.dimmer
+        }
+    }
+
+    private func effective(_ p: RampPolicy) -> RampPolicy {
+        backlight == nil ? .softwareOnly(dimmerFloor: p.dimmerFloor) : p
+    }
+}
