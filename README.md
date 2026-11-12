@@ -24,9 +24,6 @@ open /Applications/MonitorKeys.app
 
 Requires macOS 14+ on Apple Silicon.
 
-Upgrading from 0.1 (when the app was called Lumen): your settings carry over. Delete `Lumen.app`,
-and grant Accessibility permission again to MonitorKeys.
-
 ## Build
 
 Requires Swift 6.

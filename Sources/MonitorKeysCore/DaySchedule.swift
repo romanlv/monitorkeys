@@ -99,7 +99,7 @@ public struct DaySchedule: Codable, Equatable, Sendable {
         return (daylight, night)
     }
 
-    /// Target lumen (0...1) at a minute of the local day.
+    /// Target brightness (0...1) at a minute of the local day.
     public func level(atMinute m: Double, sun: SunTimes) -> Double {
         let w = weights(atMinute: m, sun: sun)
         let sunLevel = eveningLevel + (dayLevel - eveningLevel) * w.daylight

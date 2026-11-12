@@ -5,7 +5,7 @@ let package = Package(
     name: "MonitorKeys",
     platforms: [.macOS(.v14)],
     targets: [
-        // Pure logic: the lumen ramp and the MCCS packet codec. No hardware access.
+        // Pure logic: the brightness ramp and the MCCS packet codec. No hardware access.
         .target(name: "MonitorKeysCore"),
         // The menu-bar app: display discovery, channels, UI.
         .executableTarget(name: "MonitorKeys", dependencies: ["MonitorKeysCore"]),

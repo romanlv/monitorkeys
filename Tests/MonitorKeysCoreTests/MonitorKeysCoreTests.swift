@@ -69,20 +69,20 @@ import Foundation
     let table = RampTable(policy: RampPolicy(dimmingStart: 0.3, backlightFloor: 0.1, dimmerFloor: 0.2))
 
     @Test func endpoints() {
-        #expect(table.levels(forLumen: 0) == .init(backlight: 0.1, dimmer: 0.2))
-        #expect(table.levels(forLumen: 1) == .init(backlight: 1, dimmer: 1))
-        #expect(table.levels(forLumen: 0.3) == .init(backlight: 0.1, dimmer: 1))
+        #expect(table.levels(forBrightness: 0) == .init(backlight: 0.1, dimmer: 0.2))
+        #expect(table.levels(forBrightness: 1) == .init(backlight: 1, dimmer: 1))
+        #expect(table.levels(forBrightness: 0.3) == .init(backlight: 0.1, dimmer: 1))
     }
 
     @Test func clampsOutOfRange() {
-        #expect(table.levels(forLumen: -1) == table.levels(forLumen: 0))
-        #expect(table.levels(forLumen: 2) == table.levels(forLumen: 1))
+        #expect(table.levels(forBrightness: -1) == table.levels(forBrightness: 0))
+        #expect(table.levels(forBrightness: 2) == table.levels(forBrightness: 1))
     }
 
     @Test func bothChannelsAreMonotonic() {
-        var previous = table.levels(forLumen: 0)
+        var previous = table.levels(forBrightness: 0)
         for i in 1...100 {
-            let next = table.levels(forLumen: Double(i) / 100)
+            let next = table.levels(forBrightness: Double(i) / 100)
             #expect(next.backlight >= previous.backlight - 1e-12)
             #expect(next.dimmer >= previous.dimmer - 1e-12)
             previous = next
@@ -92,27 +92,27 @@ import Foundation
     @Test func reverseRoundTrips() {
         for i in 0...100 {
             let l = Double(i) / 100
-            #expect(abs(table.lumen(for: table.levels(forLumen: l)) - l) < 1e-9)
+            #expect(abs(table.brightness(for: table.levels(forBrightness: l)) - l) < 1e-9)
         }
     }
 
     @Test func reverseFollowsExternalBacklightChange() {
         // Monitor buttons moved backlight to 55% while the dimmer is at full.
-        let l = table.lumen(for: .init(backlight: 0.55, dimmer: 1))
-        #expect(abs(table.levels(forLumen: l).backlight - 0.55) < 1e-9)
+        let l = table.brightness(for: .init(backlight: 0.55, dimmer: 1))
+        #expect(abs(table.levels(forBrightness: l).backlight - 0.55) < 1e-9)
     }
 
     @Test func softwareOnlyNeverNeedsBacklight() {
         let t = RampTable(policy: .softwareOnly(dimmerFloor: 0.2))
-        #expect(t.levels(forLumen: 0).dimmer == 0.2)
-        #expect(t.levels(forLumen: 1).dimmer == 1)
-        #expect(abs(t.lumen(for: .init(backlight: 1, dimmer: 0.6)) - 0.5) < 1e-9)
+        #expect(t.levels(forBrightness: 0).dimmer == 0.2)
+        #expect(t.levels(forBrightness: 1).dimmer == 1)
+        #expect(abs(t.brightness(for: .init(backlight: 1, dimmer: 0.6)) - 0.5) < 1e-9)
     }
 
     @Test func noSoftwareDimming() {
         let t = RampTable(policy: RampPolicy(dimmingStart: 0, backlightFloor: 0, dimmerFloor: 0.2))
-        #expect(t.levels(forLumen: 0) == .init(backlight: 0, dimmer: 1))
-        #expect(t.levels(forLumen: 0.5) == .init(backlight: 0.5, dimmer: 1))
+        #expect(t.levels(forBrightness: 0) == .init(backlight: 0, dimmer: 1))
+        #expect(t.levels(forBrightness: 0.5) == .init(backlight: 0.5, dimmer: 1))
     }
 }
 

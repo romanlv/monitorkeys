@@ -25,11 +25,11 @@ final class DayScheduler {
 
     @ObservationIgnored var coordinators: () -> [BlendCoordinator] = { [] }
     @ObservationIgnored private var timer: Timer?
-    /// The lumen level each display was last moved to by the schedule, to notice changes made elsewhere.
+    /// The brightness each display was last moved to by the schedule, to notice changes made elsewhere.
     @ObservationIgnored private var scheduled: [CGDirectDisplayID: Double] = [:]
     @ObservationIgnored private let defaults = UserDefaults.standard
 
-    /// Largest lumen change per tick when following the schedule, so resuming after a hold or
+    /// Largest brightness change per tick when following the schedule, so resuming after a hold or
     /// waking from sleep glides instead of jumping.
     private let maxStep = 0.05
     private let tickSeconds: TimeInterval = 30
@@ -103,11 +103,11 @@ final class DayScheduler {
                 userAdjusted(c.display)
             }
             guard held[c.display] == nil else { continue }
-            let delta = target - c.lumen
+            let delta = target - c.brightness
             if abs(delta) > 0.002 {
-                c.set(lumen: immediate ? target : c.lumen + min(max(delta, -maxStep), maxStep))
+                c.set(brightness: immediate ? target : c.brightness + min(max(delta, -maxStep), maxStep))
             }
-            scheduled[c.display] = c.lumen
+            scheduled[c.display] = c.brightness
         }
     }
 

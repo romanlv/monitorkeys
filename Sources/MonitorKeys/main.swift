@@ -55,18 +55,6 @@ if CommandLine.arguments.contains("--probe") {
     exit(0)
 }
 
-/// Brings settings over from the app's previous name (bundle id dev.ourapp.lumen), once.
-func migrateSettingsFromOldName() {
-    let d = UserDefaults.standard
-    guard !d.bool(forKey: "migratedFromOldName") else { return }
-    for (key, value) in UserDefaults.standard.persistentDomain(forName: "dev.ourapp.lumen") ?? [:]
-    where d.object(forKey: key) == nil {
-        d.set(value, forKey: key)
-    }
-    d.set(true, forKey: "migratedFromOldName")
-}
-
-migrateSettingsFromOldName()
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

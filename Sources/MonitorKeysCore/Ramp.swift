@@ -1,6 +1,6 @@
-/// How one "lumen" value (0...1) is split between the hardware backlight and the software dimmer.
+/// How one "brightness" value (0...1) is split between the hardware backlight and the software dimmer.
 public struct RampPolicy: Codable, Equatable, Sendable {
-    /// Point on the lumen scale below which the backlight stays at its floor and only the dimmer moves.
+    /// Point on the brightness scale below which the backlight stays at its floor and only the dimmer moves.
     public var dimmingStart: Double
     /// Lowest backlight level ever requested (0...1). Raise it if low PWM levels bother you.
     public var backlightFloor: Double
@@ -34,14 +34,14 @@ public struct ChannelLevels: Equatable, Sendable {
     }
 }
 
-/// One linear piece of the ramp: as lumen moves across `lumen`, each channel moves across its range.
+/// One linear piece of the ramp: as brightness moves across `brightness`, each channel moves across its range.
 public struct RampSegment: Equatable, Sendable {
-    public var lumen: ClosedRange<Double>
+    public var brightness: ClosedRange<Double>
     public var backlight: ClosedRange<Double>
     public var dimmer: ClosedRange<Double>
 }
 
-/// Ordered, non-overlapping segments covering lumen 0...1.
+/// Ordered, non-overlapping segments covering brightness 0...1.
 public struct RampTable: Equatable, Sendable {
     public let segments: [RampSegment]
 
@@ -50,38 +50,38 @@ public struct RampTable: Equatable, Sendable {
         var s: [RampSegment] = []
         if p.dimmingStart > 0 {
             // Low end: backlight parked at its floor, dimmer rises to full.
-            s.append(RampSegment(lumen: 0...p.dimmingStart,
+            s.append(RampSegment(brightness: 0...p.dimmingStart,
                                  backlight: p.backlightFloor...p.backlightFloor,
                                  dimmer: min(p.dimmerFloor, 1)...1))
         }
         if p.dimmingStart < 1 {
             // High end: dimmer at full, backlight rises from its floor to max.
-            s.append(RampSegment(lumen: p.dimmingStart...1,
+            s.append(RampSegment(brightness: p.dimmingStart...1,
                                  backlight: p.backlightFloor...1,
                                  dimmer: 1...1))
         }
         segments = s
     }
 
-    /// Forward mapping: lumen → channel levels.
-    public func levels(forLumen value: Double) -> ChannelLevels {
+    /// Forward mapping: brightness → channel levels.
+    public func levels(forBrightness value: Double) -> ChannelLevels {
         let l = value.clamped01
-        guard let seg = segments.first(where: { $0.lumen.contains(l) }) ?? segments.last else {
+        guard let seg = segments.first(where: { $0.brightness.contains(l) }) ?? segments.last else {
             return ChannelLevels(backlight: 1, dimmer: 1)
         }
-        let t = seg.lumen.span > 0 ? (l - seg.lumen.lowerBound) / seg.lumen.span : 1
+        let t = seg.brightness.span > 0 ? (l - seg.brightness.lowerBound) / seg.brightness.span : 1
         return ChannelLevels(backlight: seg.backlight.lerp(t), dimmer: seg.dimmer.lerp(t))
     }
 
-    /// Reverse mapping: observed channel levels → lumen. Used when the backlight is changed elsewhere
+    /// Reverse mapping: observed channel levels → brightness. Used when the backlight is changed elsewhere
     /// (for example with the monitor's own buttons) so the slider can follow it.
-    public func lumen(for levels: ChannelLevels) -> Double {
+    public func brightness(for levels: ChannelLevels) -> Double {
         let eps = 1e-6
         if levels.dimmer < 1 - eps, let seg = segments.first(where: { $0.dimmer.span > eps }) {
-            return seg.lumen.lerp(seg.dimmer.fraction(of: levels.dimmer))
+            return seg.brightness.lerp(seg.dimmer.fraction(of: levels.dimmer))
         }
         if let seg = segments.first(where: { $0.backlight.span > eps }) {
-            return seg.lumen.lerp(seg.backlight.fraction(of: levels.backlight))
+            return seg.brightness.lerp(seg.backlight.fraction(of: levels.backlight))
         }
         return 1
     }

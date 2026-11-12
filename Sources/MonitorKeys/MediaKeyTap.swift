@@ -18,7 +18,7 @@ final class MediaKeyTap {
     var speakerTarget: () -> BlendCoordinator? = { nil }
     /// Which display the brightness keys act on.
     var mode: KeyTargetMode = .pointer
-    /// Called after a key changed a display's lumen.
+    /// Called after a key changed a display's brightness.
     var onChange: (BlendCoordinator) -> Void = { _ in }
     /// Called after a key changed a display's speaker volume or mute.
     var onSpeakerChange: (BlendCoordinator) -> Void = { _ in }
@@ -115,7 +115,7 @@ final class MediaKeyTap {
 
     private func brightness(_ direction: StepDirection, fine: Bool) -> Bool {
         guard brightnessKeys, let display = mode.display(), let coordinator = target(display) else { return false }
-        coordinator.set(lumen: LevelStep.next(from: coordinator.lumen, key: direction, fine: fine))
+        coordinator.set(brightness: LevelStep.next(from: coordinator.brightness, key: direction, fine: fine))
         onChange(coordinator)
         return true
     }

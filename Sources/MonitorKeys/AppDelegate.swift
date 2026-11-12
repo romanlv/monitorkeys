@@ -63,7 +63,7 @@ enum DisplayInventory {
     /// Coordinators in `keeping` whose display is still online are reused as they are, so a working
     /// DDC channel is not re-created (and not raced) on every hot-plug. External displays that ended
     /// up with software dimming only are probed again (the monitor may have been in standby), and
-    /// the replacement continues at the same lumen.
+    /// the replacement continues at the same brightness.
     static func coordinators(settings: Settings, keeping: [BlendCoordinator] = [],
                              reprobe: Bool = false) -> [BlendCoordinator] {
         let ids = online()
@@ -91,7 +91,7 @@ enum DisplayInventory {
             let old = previous[id]
             let c = BlendCoordinator(display: id, name: name(of: id), backlight: backlight, speaker: speaker,
                                      policy: settings.policy, dimmer: old?.dimmerLevel ?? 1)
-            if let old { c.set(lumen: old.lumen) }
+            if let old { c.set(brightness: old.brightness) }
             return c
         }
     }
@@ -130,7 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         keyTap.onChange = { [unowned self] c in
             scheduler.userAdjusted(c.display)
-            hud.show(level: c.lumen, on: c.display)
+            hud.show(level: c.brightness, on: c.display)
         }
         // Sound keys act on monitor speakers only while the Mac plays through them and macOS can't set their volume.
         keyTap.speakerTarget = { [unowned self] in speakerForCurrentOutput() }
@@ -231,9 +231,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if c.backlight is BuiltInBacklight { c.resync() }
             let item = NSMenuItem()
             let detail = c.backlight?.kind ?? "software dimming only"
-            item.view = SliderRow(title: "\(c.name) — \(detail)", value: c.lumen) { [weak self, weak c] v in
+            item.view = SliderRow(title: "\(c.name) — \(detail)", value: c.brightness) { [weak self, weak c] v in
                 guard let c else { return }
-                c.set(lumen: v)
+                c.set(brightness: v)
                 self?.scheduler.userAdjusted(c.display)
             }
             menu.addItem(item)

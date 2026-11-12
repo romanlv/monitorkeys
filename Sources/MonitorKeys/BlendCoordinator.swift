@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 import MonitorKeysCore
 
-/// Owns one display: turns a lumen value into backlight + dimmer writes, and only writes a channel
+/// Owns one display: turns a brightness value into backlight + dimmer writes, and only writes a channel
 /// whose level actually changed.
 final class BlendCoordinator {
     let display: CGDirectDisplayID
@@ -13,7 +13,7 @@ final class BlendCoordinator {
     private let dimmer: GammaDimmer
     private var table: RampTable
     private var written: ChannelLevels
-    private(set) var lumen: Double
+    private(set) var brightness: Double
 
     var policy: RampPolicy {
         didSet { table = RampTable(policy: effective(policy)); apply() }
@@ -34,7 +34,7 @@ final class BlendCoordinator {
         self.table = table
         let current = ChannelLevels(backlight: backlight?.read() ?? 1, dimmer: currentDimmer)
         self.written = current
-        self.lumen = table.lumen(for: current)
+        self.brightness = table.brightness(for: current)
     }
 
     /// Gamma level this coordinator last put on the display.
@@ -46,8 +46,8 @@ final class BlendCoordinator {
     /// The DDC bus this display's channels use, if any.
     var busID: UInt64? { (backlight as? BusBacklight)?.link.registryID ?? speaker?.link.registryID }
 
-    func set(lumen value: Double) {
-        lumen = min(max(value, 0), 1)
+    func set(brightness value: Double) {
+        brightness = min(max(value, 0), 1)
         apply()
     }
 
@@ -68,12 +68,12 @@ final class BlendCoordinator {
             dimmer.write(1)
             written.dimmer = 1
         }
-        lumen = table.lumen(for: written)
+        brightness = table.brightness(for: written)
         return moved
     }
 
     private func apply() {
-        let target = table.levels(forLumen: lumen)
+        let target = table.levels(forBrightness: brightness)
         if let backlight, abs(target.backlight - written.backlight) > 0.0005 {
             backlight.write(target.backlight)
             written.backlight = target.backlight
