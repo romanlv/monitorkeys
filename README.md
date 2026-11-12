@@ -10,6 +10,7 @@ A small macOS menu-bar app for external monitors on Apple Silicon:
   monitor (DisplayPort/HDMI audio that macOS can't control).
 - **Day schedule:** brightness follows sunrise and sunset, with Day, Evening and Night levels and a
   bedtime. A manual change holds until the next transition.
+- **Open at Login:** a menu toggle that registers the app as a macOS login item.
 
 ## Install
 

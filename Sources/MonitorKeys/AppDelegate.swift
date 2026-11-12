@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 import MonitorKeysCore
 
@@ -287,6 +288,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             note.isEnabled = false
             menu.addItem(note)
         }
+        let login = ClosureMenuItem(title: "Open at Login") { [unowned self] in toggleOpenAtLogin() }
+        switch SMAppService.mainApp.status {
+        case .enabled: login.state = .on
+        case .requiresApproval: login.state = .mixed
+        default: login.state = .off
+        }
+        menu.addItem(login)
         menu.addItem(ClosureMenuItem(title: "Re-read hardware levels") { [unowned self] in
             refreshDisplays(reprobe: true)
             coordinators.forEach { $0.resync(); $0.speaker?.resync() }
@@ -294,6 +302,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(advanced)
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem(title: "Quit MonitorKeys") { NSApp.terminate(nil) })
+    }
+
+    /// The login item is the app bundle itself, registered with macOS; the system keeps the on/off state.
+    private func toggleOpenAtLogin() {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled || service.status == .requiresApproval {
+                try service.unregister()
+            } else {
+                try service.register()
+            }
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Couldn't change Open at Login"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+        if service.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
     }
 
     private func choices<T: Equatable>(_ title: String, _ options: [(String, T)], current: T,
