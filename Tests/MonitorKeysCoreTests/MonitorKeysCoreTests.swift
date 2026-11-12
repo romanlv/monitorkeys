@@ -331,3 +331,204 @@ import Foundation
                                     monitors: ["LG ULTRAWIDE"]) == nil)
     }
 }
+
+@Suite struct BinaryWatchTests {
+    /// Runs `body` with `source` copied into its own temporary folder; the folder is removed afterwards.
+    private func withCopy(of source: String? = nil, _ body: (URL) throws -> Void) throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("exe")
+        if let source {
+            try FileManager.default.copyItem(atPath: source, toPath: file.path)
+        } else {
+            try Data("v1".utf8).write(to: file)
+        }
+        try body(file)
+    }
+
+    private func watch(_ file: URL) -> BinaryWatch { BinaryWatch(code: file, executable: file.path) }
+
+    /// Starts the watch; the returned semaphore is signalled when its callback runs.
+    private func arm(_ watch: BinaryWatch) -> DispatchSemaphore {
+        let fired = DispatchSemaphore(value: 0)
+        watch.watch(queue: DispatchQueue(label: "test")) { fired.signal() }
+        return fired
+    }
+
+    /// Overwrites `file` in place, keeping its inode, the way `cp` onto an existing file does.
+    private func overwrite(_ file: URL, with data: Data) throws {
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.truncate(atOffset: 0)
+        try handle.write(contentsOf: data)
+        try handle.close()
+    }
+
+    /// Where each architecture starts in a universal binary ([0] for a thin one). Only the host's
+    /// slice is validated, so a change must hit every slice to be sure of reaching it.
+    private func sliceOffsets(_ bytes: Data) -> [Int] {
+        func u32(_ at: Int) -> UInt32 { bytes[at..<at + 4].reduce(0) { $0 << 8 | UInt32($1) } } // big-endian
+        func u64(_ at: Int) -> UInt64 { UInt64(u32(at)) << 32 | UInt64(u32(at + 4)) }
+        switch u32(0) {
+        case 0xCAFEBABE: return (0..<Int(u32(4))).map { Int(u32(8 + $0 * 20 + 8)) }   // fat_arch
+        case 0xCAFEBABF: return (0..<Int(u32(4))).map { Int(u64(8 + $0 * 32 + 8)) }   // fat_arch_64
+        default: return [0]
+        }
+    }
+
+    @Test func untouchedFileIsIntact() throws {
+        try withCopy { #expect(watch($0).isIntact) }
+    }
+
+    @Test func untouchedSignedBinaryIsIntact() throws {
+        try withCopy(of: "/usr/bin/true") { #expect(watch($0).isIntact) }
+    }
+
+    @Test func signedBinaryOverwrittenInPlaceIsNotIntactAndFires() throws {
+        try withCopy(of: "/usr/bin/true") { file in
+            let w = watch(file)
+            let fired = arm(w)
+            try overwrite(file, with: try Data(contentsOf: URL(fileURLWithPath: "/bin/echo")))
+            #expect(fired.wait(timeout: .now() + 2) == .success)
+            #expect(!w.isIntact)
+        }
+    }
+
+    @Test func signedBinaryWithOneByteChangedIsNotIntact() throws {
+        try withCopy(of: "/usr/bin/true") { file in
+            let w = watch(file)
+            var bytes = try Data(contentsOf: file)
+            for offset in sliceOffsets(bytes) { bytes[offset + 64] ^= 0xFF } // load commands, signed
+            try overwrite(file, with: bytes)
+            #expect(!w.isIntact) // after a second try, in case the read failure was transient
+        }
+    }
+
+    @Test func signedBinaryWithOnlyMetadataTouchedStaysIntact() throws {
+        try withCopy(of: "/usr/bin/true") { file in
+            let w = watch(file)
+            #expect(setxattr(file.path, "dev.test", "x", 1, 0, 0) == 0) // bumps ctime, not the code
+            #expect(w.isIntact)
+            #expect(w.isIntact)
+        }
+    }
+
+    @Test func unsignedFileOverwrittenInPlaceIsNotIntact() throws {
+        try withCopy { file in
+            let w = watch(file)
+            try overwrite(file, with: Data("v2!".utf8))
+            #expect(!w.isIntact)
+        }
+    }
+
+    @Test func deletedFileIsNotIntactAndFires() throws {
+        try withCopy { file in
+            let w = watch(file)
+            let fired = arm(w)
+            try FileManager.default.removeItem(at: file)
+            #expect(fired.wait(timeout: .now() + 2) == .success)
+            #expect(!w.isIntact)
+        }
+    }
+
+    @Test func fileReplacedByRenameIsNotIntactAndFires() throws {
+        try withCopy { file in
+            let w = watch(file)
+            let replacement = file.deletingLastPathComponent().appendingPathComponent("new")
+            try Data("v2".utf8).write(to: replacement)
+            let fired = arm(w)
+            #expect(rename(replacement.path, file.path) == 0)
+            #expect(fired.wait(timeout: .now() + 2) == .success)
+            #expect(!w.isIntact)
+        }
+    }
+
+    @Test func fileDeletedAndRecreatedIsNotIntact() throws {
+        try withCopy { file in
+            let w = watch(file)
+            try FileManager.default.removeItem(at: file)
+            try Data("v1".utf8).write(to: file)
+            #expect(!w.isIntact)
+        }
+    }
+
+    @Test func movedParentFolderIsNotIntact() throws {
+        try withCopy { file in
+            let w = watch(file)
+            let dir = file.deletingLastPathComponent()
+            let moved = dir.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
+            try FileManager.default.moveItem(at: dir, to: moved)
+            defer { try? FileManager.default.removeItem(at: moved) }
+            #expect(!w.isIntact)
+        }
+    }
+
+    @Test func missingFileAtStartCountsAsIntact() {
+        let path = "/nonexistent/\(UUID().uuidString)"
+        #expect(BinaryWatch(code: URL(fileURLWithPath: path), executable: path).isIntact)
+    }
+}
+
+/// The app's own case: a signed .app bundle, where the signature also covers Info.plist and every
+/// file in the bundle.
+@Suite struct BinaryWatchBundleTests {
+    /// Runs `body` with a freshly built, ad-hoc signed Test.app; its folder is removed afterwards.
+    private func withSignedBundle(_ body: (_ app: URL, _ exe: URL) throws -> Void) throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let app = dir.appendingPathComponent("Test.app")
+        let macOS = app.appendingPathComponent("Contents/MacOS")
+        try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
+        let exe = macOS.appendingPathComponent("Test")
+        try FileManager.default.copyItem(atPath: "/usr/bin/true", toPath: exe.path)
+        let plist: [String: Any] = ["CFBundleIdentifier": "dev.test.binarywatch", "CFBundleExecutable": "Test",
+                                    "CFBundlePackageType": "APPL"]
+        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            .write(to: app.appendingPathComponent("Contents/Info.plist"))
+        let sign = Process()
+        sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        sign.arguments = ["--force", "--sign", "-", app.path]
+        sign.standardError = FileHandle.nullDevice
+        try sign.run()
+        sign.waitUntilExit()
+        try #require(sign.terminationStatus == 0)
+        try body(app, exe)
+    }
+
+    @Test func untouchedBundleIsIntact() throws {
+        try withSignedBundle { app, exe in
+            let w = BinaryWatch(code: app, executable: exe.path)
+            #expect(w.isIntact)
+            #expect(w.isIntact)
+        }
+    }
+
+    @Test func editedInfoPlistIsNotIntact() throws {
+        try withSignedBundle { app, exe in
+            let w = BinaryWatch(code: app, executable: exe.path)
+            let plist = app.appendingPathComponent("Contents/Info.plist")
+            var dict = try #require(NSDictionary(contentsOf: plist) as? [String: Any])
+            dict["CFBundleVersion"] = "99"
+            try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0).write(to: plist)
+            #expect(!w.isIntact)
+        }
+    }
+
+    @Test func fileAddedToTheBundleIsNotIntact() throws {
+        try withSignedBundle { app, exe in
+            let w = BinaryWatch(code: app, executable: exe.path)
+            let resources = app.appendingPathComponent("Contents/Resources")
+            try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: resources.appendingPathComponent("extra.txt"))
+            #expect(!w.isIntact)
+        }
+    }
+
+    @Test func metadataOnTheBundleStaysIntact() throws {
+        try withSignedBundle { app, exe in
+            let w = BinaryWatch(code: app, executable: exe.path)
+            #expect(setxattr(app.path, "dev.test", "x", 1, 0, 0) == 0) // like LaunchServices' last-used date
+            #expect(w.isIntact)
+        }
+    }
+}

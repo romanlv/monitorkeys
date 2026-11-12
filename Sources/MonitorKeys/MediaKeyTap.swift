@@ -24,6 +24,8 @@ final class MediaKeyTap {
     var onSpeakerChange: (BlendCoordinator) -> Void = { _ in }
 
     private var port: CFMachPort?
+    /// The last start failed and was logged; retries stay quiet until one succeeds.
+    private var startFailureLogged = false
     private var source: CFRunLoopSource?
     /// Presses we consumed, by key and by event shape, so only their matching releases are consumed.
     private var swallowed = Set<Swallowed>()
@@ -52,9 +54,13 @@ final class MediaKeyTap {
                                            callback: brightnessTapCallback,
                                            userInfo: Unmanaged.passUnretained(self).toOpaque())
         else {
-            log.error("brightness key tap could not be created (Accessibility permission missing?)")
+            if !startFailureLogged {
+                log.error("brightness key tap could not be created (Accessibility permission missing?)")
+                startFailureLogged = true
+            }
             return false
         }
+        startFailureLogged = false
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)

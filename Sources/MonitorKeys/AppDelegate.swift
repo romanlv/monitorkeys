@@ -104,11 +104,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var coordinators: [BlendCoordinator] = []
     private let keyTap = MediaKeyTap()
     private let hud = LevelHUD()
-    private var trustPoll: Timer?
     private let scheduler = DayScheduler()
     private var scheduleWindow: NSWindow?
+    private let binary = BinaryWatch()
+    private var checkPending = false
+    /// The app on disk was deleted, moved, or changed while no tap was running; none is started
+    /// again until the app is reopened.
+    private var codeChanged = false
+    private var safetyPoll: Timer?
+    private var terminationSignal: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        startSafetyChecks() // first, so the key tap is never up without them
         GammaDimmer.resetAll()
         coordinators = DisplayInventory.coordinators(settings: settings)
 
@@ -142,7 +149,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         keyTap.brightnessKeys = settings.brightnessKeys
         keyTap.soundKeys = settings.soundKeys
-        if settings.brightnessKeys || settings.soundKeys { enableKeyTap(prompt: true) }
+        if wantsKeyTap { enableKeyTap(prompt: true) }
+        updateSafetyPoll()
 
         scheduler.coordinators = { [unowned self] in coordinators }
         scheduler.start()
@@ -164,23 +172,103 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         scheduleWindow?.makeKeyAndOrderFront(nil)
     }
 
+    // MARK: safety
+
+    /// Keeps the key tap from locking up the Mac's input. If the app on disk is deleted, moved, or
+    /// changed while it runs, macOS can no longer verify it and WindowServer drops every key and
+    /// click the tap hands back, leaving the user no way to quit it. So a running tap makes the app
+    /// quit by itself: right after a change to its executable (file watch) or within a few seconds
+    /// (poll, which also catches a moved folder or an edited Info.plist). Without a running tap
+    /// nothing is at risk; the app keeps working but starts no tap until it is reopened.
+    ///
+    /// The same poll keeps the tap in line with Accessibility permission: it is removed when the
+    /// permission goes away and started once it is granted.
+    private func startSafetyChecks() {
+        // A copy over the executable arrives as a burst of write events: check 0.2 s after the first
+        // (not after the last, so a slow copy doesn't leave a broken tap up), once per burst.
+        binary.watch { [unowned self] in
+            guard !checkPending else { return }
+            checkPending = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [unowned self] in
+                checkPending = false
+                checkSafety()
+            }
+        }
+
+        // `kill` (as build-app.sh does before replacing the bundle) gets the same cleanup as Quit,
+        // run on the main thread like everything else that touches the tap and gamma. Received off
+        // the main thread, so that if it is stuck the app still goes within 2 s (the tap with it).
+        signal(SIGTERM, SIG_IGN)
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+        term.setEventHandler { [unowned self] in
+            DispatchQueue.main.async { [unowned self] in
+                cleanUp()
+                exit(0)
+            }
+            Thread.sleep(forTimeInterval: 2)
+            _exit(0)
+        }
+        term.resume()
+        terminationSignal = term
+    }
+
+    /// Runs the poll only while there is a tap to guard or wait for.
+    private func updateSafetyPoll() {
+        let needed = (wantsKeyTap && !codeChanged) || keyTap.isRunning
+        if needed, safetyPoll == nil {
+            let timer = Timer(timeInterval: 2, repeats: true) { [unowned self] _ in checkSafety() }
+            timer.tolerance = 0.5
+            RunLoop.main.add(timer, forMode: .common) // keep checking while a menu is open
+            safetyPoll = timer
+        } else if !needed {
+            safetyPoll?.invalidate()
+            safetyPoll = nil
+        }
+    }
+
+    /// Acts on a change to the app on disk: quits if a tap is running, otherwise keeps the keys off
+    /// until the app is reopened. Returns true only while the code is unchanged. Not a plain query.
+    private func quitOrDisableKeysIfCodeChanged() -> Bool {
+        if !codeChanged, binary.isIntact { return true }
+        if keyTap.isRunning {
+            log.error("\(self.binary.code.path, privacy: .public) was deleted, moved, or changed; quitting so the key tap can't block input")
+            cleanUp()
+            exit(0) // at once: NSApp.terminate can be postponed, e.g. by a modal alert
+        }
+        if !codeChanged {
+            log.error("\(self.binary.code.path, privacy: .public) was deleted, moved, or changed; the keyboard keys stay off until MonitorKeys is reopened")
+            codeChanged = true
+            updateSafetyPoll()
+        }
+        return false
+    }
+
+    private func checkSafety() {
+        guard wantsKeyTap || keyTap.isRunning else { return } // no tap, nothing to block input
+        guard quitOrDisableKeysIfCodeChanged() else { return }
+        let trusted = MediaKeyTap.isTrusted
+        if keyTap.isRunning, !trusted {
+            log.error("Accessibility permission was lost; removing the key tap until it is granted again")
+            keyTap.stop()
+        } else if !keyTap.isRunning, trusted, wantsKeyTap {
+            keyTap.start()
+        }
+    }
+
+    /// What every way of quitting must do: no tap left behind, no display left dimmed.
+    private func cleanUp() {
+        keyTap.stop()
+        GammaDimmer.resetAll()
+    }
+
     // MARK: keys
 
     private var wantsKeyTap: Bool { settings.brightnessKeys || settings.soundKeys }
 
+    /// Starts the tap now if permission is there; otherwise the safety poll starts it once it is granted.
     private func enableKeyTap(prompt: Bool) {
-        if MediaKeyTap.isTrusted, keyTap.start() { return }
-        if prompt, !MediaKeyTap.isTrusted { MediaKeyTap.promptForTrust() }
-        // Permission is granted in System Settings while we keep running; start as soon as it lands
-        // (and keep retrying if the tap still cannot be created).
-        trustPoll?.invalidate()
-        trustPoll = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
-            guard let self else { return timer.invalidate() }
-            guard self.wantsKeyTap else { timer.invalidate(); self.trustPoll = nil; return }
-            guard MediaKeyTap.isTrusted, self.keyTap.start() else { return }
-            timer.invalidate()
-            self.trustPoll = nil
-        }
+        guard quitOrDisableKeysIfCodeChanged() else { return }
+        if MediaKeyTap.isTrusted { keyTap.start() } else if prompt { MediaKeyTap.promptForTrust() }
     }
 
     private func setBrightnessKeys(_ mode: KeyTargetMode?) {
@@ -205,10 +293,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if wantsKeyTap {
             enableKeyTap(prompt: true)
         } else {
-            trustPoll?.invalidate()
-            trustPoll = nil
             keyTap.stop()
         }
+        updateSafetyPoll()
     }
 
     /// The display whose speakers the sound keys should drive right now, if any.
@@ -221,7 +308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        GammaDimmer.resetAll() // never leave a display dimmed by a process that is gone
+        cleanUp() // never leave a display dimmed by a process that is gone
     }
 
     // MARK: menu
@@ -284,7 +371,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sound.state = settings.soundKeys ? .on : .off
         menu.addItem(sound)
         if wantsKeyTap && !keyTap.isRunning {
-            let note = NSMenuItem(title: "Waiting for Accessibility permission…", action: nil, keyEquivalent: "")
+            let title = codeChanged ? "MonitorKeys was moved or changed: reopen it to use the keys"
+                                    : "Waiting for Accessibility permission…"
+            let note = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             note.isEnabled = false
             menu.addItem(note)
         }
