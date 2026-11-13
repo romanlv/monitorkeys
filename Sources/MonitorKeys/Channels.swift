@@ -31,17 +31,3 @@ final class BuiltInBacklight: BacklightChannel {
         _ = SystemSymbols.setBrightness?(display, Float(level))
     }
 }
-
-/// Software dimming by scaling the display's gamma ramp. Public CoreGraphics API.
-final class GammaDimmer {
-    private let display: CGDirectDisplayID
-    init(display: CGDirectDisplayID) { self.display = display }
-
-    func write(_ level: Double) {
-        let v = CGGammaValue(min(max(level, 0), 1))
-        CGSetDisplayTransferByFormula(display, 0, v, 1, 0, v, 1, 0, v, 1)
-    }
-
-    /// Undo every dimmer on every display.
-    static func resetAll() { CGDisplayRestoreColorSyncSettings() }
-}

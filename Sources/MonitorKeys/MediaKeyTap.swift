@@ -201,9 +201,7 @@ final class LevelHUD {
     private var hideWork: DispatchWorkItem?
 
     func show(level: Double, on display: CGDirectDisplayID, symbol: String = "sun.max.fill") {
-        guard let screen = NSScreen.screens.first(where: {
-            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == display
-        }) else { return }
+        guard let screen = NSScreen.forDisplay(display) else { return }
         let panel = self.panel ?? makePanel()
         bar?.doubleValue = level * 16
         icon?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
@@ -226,11 +224,11 @@ final class LevelHUD {
     private func makePanel() -> NSPanel {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 220, height: 44),
                             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.level = .statusBar
+        panel.level = Shade.aboveLevel
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.ignoresMouseEvents = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
 
         let background = NSVisualEffectView(frame: panel.contentView!.bounds)
         background.material = .hudWindow

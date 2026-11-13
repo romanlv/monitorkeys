@@ -43,6 +43,12 @@ struct Settings {
     }
 }
 
+extension NSScreen {
+    static func forDisplay(_ id: CGDirectDisplayID) -> NSScreen? {
+        screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id }
+    }
+}
+
 enum DisplayInventory {
     static func online() -> [CGDirectDisplayID] {
         var count: UInt32 = 0
@@ -53,10 +59,7 @@ enum DisplayInventory {
     }
 
     static func name(of id: CGDirectDisplayID) -> String {
-        let screen = NSScreen.screens.first {
-            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
-        }
-        return screen?.localizedName ?? "Display \(id)"
+        NSScreen.forDisplay(id)?.localizedName ?? "Display \(id)"
     }
 
     /// One coordinator per online display, each with the best backlight channel available.
@@ -88,10 +91,10 @@ enum DisplayInventory {
                 backlight = BusBacklight(link: link)
                 speaker = BusSpeaker(link: link)
             }
-            // A replacement takes over the gamma its predecessor left on the display.
+            // A replacement takes over its predecessor's dimming overlay.
             let old = previous[id]
             let c = BlendCoordinator(display: id, name: name(of: id), backlight: backlight, speaker: speaker,
-                                     policy: settings.policy, dimmer: old?.dimmerLevel ?? 1)
+                                     policy: settings.policy, shade: old?.shade)
             if let old { c.set(brightness: old.brightness) }
             return c
         }
@@ -116,7 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         startSafetyChecks() // first, so the key tap is never up without them
-        GammaDimmer.resetAll()
+        clearOldGammaDimmingOnce()
         coordinators = DisplayInventory.coordinators(settings: settings)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -196,7 +199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // `kill` (as build-app.sh does before replacing the bundle) gets the same cleanup as Quit,
-        // run on the main thread like everything else that touches the tap and gamma. Received off
+        // run on the main thread like everything else that touches the tap. Received off
         // the main thread, so that if it is stuck the app still goes within 2 s (the tap with it).
         signal(SIGTERM, SIG_IGN)
         let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
@@ -255,10 +258,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// What every way of quitting must do: no tap left behind, no display left dimmed.
+    /// Up to 0.2.3 the app dimmed through the colour tables. macOS restores a process's tables when
+    /// it exits (checked on macOS 26, even on SIGKILL), but in case an older macOS left a crashed
+    /// copy's dimming behind, reset them once after upgrading. Not on a fresh install and never
+    /// again: the reset also wipes f.lux's tint until f.lux redraws.
+    private func clearOldGammaDimmingOnce() {
+        let key = "colorTablesReleased"
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: key) else { return }
+        let upgrading = !(Bundle.main.bundleIdentifier.flatMap(defaults.persistentDomain(forName:))?.isEmpty ?? true)
+        if upgrading { CGDisplayRestoreColorSyncSettings() }
+        defaults.set(true, forKey: key)
+    }
+
+    /// What every way of quitting must do before the process exits: no tap left behind. Dimming
+    /// needs no undoing: the overlay windows go with the process.
     private func cleanUp() {
         keyTap.stop()
-        GammaDimmer.resetAll()
     }
 
     // MARK: keys
@@ -308,7 +324,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        cleanUp() // never leave a display dimmed by a process that is gone
+        cleanUp()
     }
 
     // MARK: menu
@@ -444,14 +460,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func screensChanged() {
         refreshDisplays()
-        // Reconfiguration can reset gamma ramps; put back any dimming we had.
-        coordinators.forEach { $0.reassertDimmer() }
         scheduler.tick()
     }
 
     @objc private func didWake() {
         refreshDisplays(reprobe: true) // a monitor that was in standby may answer DDC now
-        coordinators.forEach { $0.reassertDimmer() }
         scheduler.tick()
     }
 }

@@ -10,35 +10,33 @@ final class BlendCoordinator {
     let backlight: BacklightChannel?
     /// The monitor's speakers, when it reports a DDC speaker volume. Rides along on the same bus.
     let speaker: BusSpeaker?
-    private let dimmer: GammaDimmer
+    /// Software dimming below the backlight's floor. A replacement coordinator for the same display
+    /// takes it over and starts from its level.
+    let shade: Shade
     private var table: RampTable
     private var written: ChannelLevels
     private(set) var brightness: Double
 
     var policy: RampPolicy {
-        didSet { table = RampTable(policy: effective(policy)); apply() }
+        didSet { table = RampTable(policy: Self.effective(policy, hasBacklight: backlight != nil)); apply() }
     }
 
     /// Starts from what the hardware reports now, so creating a coordinator writes nothing.
-    /// `dimmer` is the gamma level already on the display (full, unless a previous coordinator
-    /// for the same display left it dimmed).
+    /// `shade` is the dimming overlay of the coordinator this one replaces for the same display, if any.
     init(display: CGDirectDisplayID, name: String, backlight: BacklightChannel?, speaker: BusSpeaker? = nil,
-         policy: RampPolicy, dimmer currentDimmer: Double = 1) {
+         policy: RampPolicy, shade: Shade? = nil) {
         self.display = display
         self.name = name
         self.backlight = backlight
         self.speaker = speaker
-        self.dimmer = GammaDimmer(display: display)
+        self.shade = shade ?? Shade(display: display)
         self.policy = policy
-        let table = RampTable(policy: backlight == nil ? .softwareOnly(dimmerFloor: policy.dimmerFloor) : policy)
+        let table = RampTable(policy: Self.effective(policy, hasBacklight: backlight != nil))
         self.table = table
-        let current = ChannelLevels(backlight: backlight?.read() ?? 1, dimmer: currentDimmer)
+        let current = ChannelLevels(backlight: backlight?.read() ?? 1, dimmer: self.shade.level)
         self.written = current
         self.brightness = table.brightness(for: current)
     }
-
-    /// Gamma level this coordinator last put on the display.
-    var dimmerLevel: Double { written.dimmer }
 
     /// An external display that has no backlight channel yet; worth probing for DDC again.
     var needsProbe: Bool { backlight == nil && CGDisplayIsBuiltin(display) == 0 }
@@ -51,11 +49,6 @@ final class BlendCoordinator {
         apply()
     }
 
-    /// Re-apply the dimmer after something outside our control reset the gamma (wake, reconfiguration).
-    func reassertDimmer() {
-        if written.dimmer < 1 { dimmer.write(written.dimmer) }
-    }
-
     /// Pick up a backlight change made elsewhere (monitor buttons, macOS brightness keys).
     /// Returns true when the hardware level had moved away from what we last wrote.
     @discardableResult
@@ -65,7 +58,7 @@ final class BlendCoordinator {
         written.backlight = level
         if moved, written.dimmer < 1 {
             // Someone else is adjusting brightness: stop dimming on top of their choice.
-            dimmer.write(1)
+            shade.write(1)
             written.dimmer = 1
         }
         brightness = table.brightness(for: written)
@@ -79,12 +72,12 @@ final class BlendCoordinator {
             written.backlight = target.backlight
         }
         if abs(target.dimmer - written.dimmer) > 0.0005 {
-            dimmer.write(target.dimmer)
+            shade.write(target.dimmer)
             written.dimmer = target.dimmer
         }
     }
 
-    private func effective(_ p: RampPolicy) -> RampPolicy {
-        backlight == nil ? .softwareOnly(dimmerFloor: p.dimmerFloor) : p
+    private static func effective(_ p: RampPolicy, hasBacklight: Bool) -> RampPolicy {
+        hasBacklight ? p : .softwareOnly(dimmerFloor: p.dimmerFloor)
     }
 }

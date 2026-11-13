@@ -2,8 +2,10 @@
 
 A small macOS menu-bar app for external monitors on Apple Silicon:
 
-- **Brightness:** one slider per display. It drives the monitor's backlight over DDC/CI, then software
-  dimming below the backlight's minimum.
+- **Brightness:** one slider per display. It drives the monitor's backlight over DDC/CI, then dims
+  further below the backlight's minimum with a dark overlay, which leaves colour apps such as f.lux
+  alone. The overlay doesn't dim the pointer, the screen saver, the lock screen, or a game that
+  takes over the whole display.
 - **Brightness keys:** F1/F2 control the external display under the pointer, or the one with the
   active window. The built-in display stays with macOS.
 - **Monitor speakers:** a volume slider and mute, plus volume and mute keys, while the Mac plays through the
