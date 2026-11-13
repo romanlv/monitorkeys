@@ -112,6 +112,31 @@ public struct DaySchedule: Codable, Equatable, Sendable {
         return w.daylight >= 0.5 ? .day : .evening
     }
 
+    /// Where a phase's level is kept.
+    public static func level(of phase: Phase) -> WritableKeyPath<DaySchedule, Double> {
+        switch phase {
+        case .day: return \.dayLevel
+        case .evening: return \.eveningLevel
+        case .night: return \.nightLevel
+        }
+    }
+
+    /// The plan with the level of the phase at `m` changed so the schedule is at `level` right then.
+    /// On a plateau that is simply the phase's level. During a ramp the phase level is solved for, so
+    /// the curve still passes through `level` at `m`; it is clamped to 0...1 when that isn't reachable.
+    public func adopting(_ level: Double, atMinute m: Double, sun: SunTimes) -> DaySchedule {
+        let path = Self.level(of: phase(atMinute: m, sun: sun))
+        // The target is linear in each level: target = slope × level + offset.
+        var low = self, high = self
+        low[keyPath: path] = 0
+        high[keyPath: path] = 1
+        let offset = low.level(atMinute: m, sun: sun)
+        let slope = high.level(atMinute: m, sun: sun) - offset
+        var plan = self
+        plan[keyPath: path] = (slope > 1e-6 ? (level - offset) / slope : level).clamped01
+        return plan
+    }
+
     /// Minutes from `m` until the next ramp starts (sunrise, sunset, bedtime or wake-up).
     /// A manual change holds until then.
     public func minutesUntilNextTransition(afterMinute m: Double, sun: SunTimes) -> Double {

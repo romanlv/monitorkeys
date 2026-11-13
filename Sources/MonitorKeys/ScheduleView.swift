@@ -24,6 +24,12 @@ struct ScheduleView: View {
                         Text("\(displayName(display)) is held at your setting until \(until.formatted(date: .omitted, time: .shortened)).")
                             .font(.callout).foregroundStyle(.secondary)
                         Spacer()
+                        // Computed from the same moment as the label, so it changes the phase it names.
+                        let adoption = scheduler.adoption(display)
+                        let phase = adoption?.phase ?? scheduler.phaseNow
+                        Button("Use for \(phase.rawValue)") { scheduler.adopt(display, phase: phase) }
+                            .help("Make this display's brightness the \(phase.rawValue) level")
+                            .disabled(adoption == nil)
                         Button("Resume") { scheduler.resume(display) }
                     }
                 }

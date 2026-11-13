@@ -84,6 +84,34 @@ final class DayScheduler {
         scheduled[display] = nil
     }
 
+    /// Makes a held display's brightness part of the plan: set `plan` to the result's plan. The
+    /// current phase's level is set so the schedule is at that brightness now; setting the plan ends
+    /// every hold and moves the other displays to the new level. Also gives the phase it changes and
+    /// that phase's new level, for the UI.
+    /// During a ramp the level differs from the display's brightness (see `DaySchedule.adopting`).
+    /// Nil for a display the schedule doesn't follow, and when no level in 0...1 puts the schedule at
+    /// the display's brightness now (early in a ramp, the other phase still dominates).
+    func adoption(_ display: CGDirectDisplayID) -> (plan: DaySchedule, phase: DaySchedule.Phase, level: Double)? {
+        guard let c = coordinators().first(where: { $0.display == display }), follows(c) else { return nil }
+        let minute = Self.minuteOfDay(now)
+        let adopted = plan.adopting(c.brightness, atMinute: minute, sun: sun)
+        guard abs(adopted.level(atMinute: minute, sun: sun) - c.brightness) < 0.005 else { return nil }
+        let phase = plan.phase(atMinute: minute, sun: sun)
+        return (adopted, phase, adopted[keyPath: DaySchedule.level(of: phase)])
+    }
+
+    /// Applies `adoption(display)` as of now, if it still changes `phase` (the one the UI showed).
+    func adopt(_ display: CGDirectDisplayID, phase: DaySchedule.Phase) {
+        refreshNow()
+        if let a = adoption(display), a.phase == phase { plan = a.plan }
+    }
+
+    /// Brings `now` (and so `phaseNow`) up to date and drops expired holds, without moving any display.
+    func refreshNow() {
+        now = Date()
+        held = held.filter { $0.value > now }
+    }
+
     /// Ends the hold on one display, or on all of them.
     func resume(_ display: CGDirectDisplayID? = nil) {
         if let display { held[display] = nil } else { held.removeAll() }
@@ -92,8 +120,7 @@ final class DayScheduler {
 
     /// Moves every following display toward the schedule; `immediate` skips the glide.
     func tick(immediate: Bool = false) {
-        now = Date()
-        held = held.filter { $0.value > now }
+        refreshNow()
         guard enabled else { return }
         let target = targetNow
         for c in coordinators() where follows(c) {

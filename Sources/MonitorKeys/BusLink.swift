@@ -3,11 +3,8 @@ import IOKit
 import MonitorKeysCore
 
 /// One external monitor's DDC/CI connection. Every control on that monitor (backlight, speaker)
-/// goes through the same link, so bus transactions never overlap.
-///
-/// Writes are coalesced per VCP code: while one is on the bus, a newer value for the same code
-/// replaces the pending one, so dragging a slider never queues up a backlog. A value equal to the
-/// last one written for that code is skipped. Codes are written in the order they were first queued.
+/// goes through the same link, so bus transactions never overlap. Writes go through a
+/// `VCPWriteQueue`: coalesced per code, repeats skipped, and read back once they pause.
 final class BusLink {
     private let endpoint: BusEndpoint // keeps the registry node alive while the link exists
     private var service: CFTypeRef { endpoint.service }
@@ -15,60 +12,78 @@ final class BusLink {
     var registryID: UInt64 { endpoint.registryID }
     private let queue = DispatchQueue(label: "dev.ourapp.monitorkeys.bus")
     private let lock = NSLock()
-    private var pending: [(code: UInt8, value: UInt16)] = []
-    private var draining = false
-    private var lastSent: [UInt8: UInt16] = [:]
+    private let writes: VCPWriteQueue
     private var _tuning: BusTuning
 
     init(endpoint: BusEndpoint, tuning: BusTuning) {
         self.endpoint = endpoint
         _tuning = tuning
+        writes = VCPWriteQueue(verifies: tuning.verifiesWrites)
     }
 
     var tuning: BusTuning {
         get { lock.withLock { _tuning } }
-        set { lock.withLock { _tuning = newValue } }
+        set {
+            lock.withLock { _tuning = newValue }
+            writes.verifies = newValue.verifiesWrites
+        }
     }
 
-    /// Blocking read. Nil when the monitor gave no valid answer.
+    /// Blocking read. Nil when the monitor gave no valid answer. Runs after every write queued
+    /// before it has gone out.
     func read(_ code: UInt8) -> MCCS.Reply? {
-        let reply = queue.sync { readVCP(code) }
-        if case .value(let r)? = reply { lock.withLock { lastSent[code] = r.current } }
-        return reply
+        queue.sync {
+            let reply = readVCP(code)
+            // On the queue, so a drain can't send a newer value between the read and this note.
+            if case .value(let r)? = reply { writes.note(code, r.current) }
+            return reply
+        }
     }
 
     func write(_ code: UInt8, _ value: UInt16) {
-        let start: Bool = lock.withLock {
-            if let i = pending.firstIndex(where: { $0.code == code }) { pending[i].value = value }
-            else { pending.append((code, value)) }
-            if draining { return false }
-            draining = true
-            return true
-        }
-        if start { queue.async { self.drain() } }
+        if writes.enqueue(code, value) { queue.async { self.drain() } }
     }
 
     /// Blocking write that bypasses the "unchanged" skip. Used by the CLI.
     func writeNow(_ code: UInt8, _ value: UInt16) -> Bool {
         queue.sync {
             let ok = send(MCCS.setVCP(code: code, value: value))
-            if ok { lock.withLock { lastSent[code] = value } }
+            if ok { writes.note(code, value) }
             return ok
         }
     }
 
+    /// The last write of `code` failed or was refused (see `VCPWriteQueue.isUnconfirmed`).
+    func isUnconfirmed(_ code: UInt8) -> Bool {
+        writes.isUnconfirmed(code)
+    }
+
+    /// The monitor's value for `code` has been read and taken as it is.
+    func confirm(_ code: UInt8) {
+        writes.confirm(code)
+    }
+
+    /// The next write of `code` goes on the bus even if it repeats the last value.
+    func forget(_ code: UInt8) {
+        writes.forget(code)
+    }
+
     private func drain() {
-        while true {
-            let next: (code: UInt8, value: UInt16)? = lock.withLock {
-                if pending.isEmpty { draining = false; return nil }
-                return pending.removeFirst()
-            }
-            guard let (code, value) = next else { return }
-            if value == lock.withLock({ lastSent[code] }) { continue }
-            if send(MCCS.setVCP(code: code, value: value)) {
-                lock.withLock { lastSent[code] = value }
-            } else {
+        let bus = VCPWriteQueue.Bus(
+            send: { [unowned self] code, value in send(MCCS.setVCP(code: code, value: value)) },
+            read: { [unowned self] code in
+                if case .value(let r)? = readVCP(code) { return r.current }
+                return nil
+            },
+            pause: { usleep(25_000) }) // ten steps: writes count as paused after 250 ms
+        writes.drain(bus) { event in
+            switch event {
+            case .writeFailed(let code, let value):
                 log.error("DDC write of \(value) to VCP \(code) failed after retries")
+            case .resending(let code, let reported, let value):
+                log.info("monitor reports \(reported) for VCP \(code) after a write of \(value); sending again")
+            case .notTaken(let code, let reported, let value):
+                log.error("monitor keeps reporting \(reported) for VCP \(code) after writes of \(value)")
             }
         }
     }
@@ -141,6 +156,16 @@ final class BusBacklight: BacklightChannel {
 
     func write(_ level: Double) {
         link.write(MCCS.Code.luminance, UInt16((min(max(level, 0), 1) * Double(maximum)).rounded()))
+    }
+
+    /// Our last write failed or the monitor refused it.
+    var isUnconfirmed: Bool { link.isUnconfirmed(MCCS.Code.luminance) }
+    func confirm() { link.confirm(MCCS.Code.luminance) }
+
+    /// Sends `level` even if it is what was last written, and checks that it took.
+    func rewrite(_ level: Double) {
+        link.forget(MCCS.Code.luminance)
+        write(level)
     }
 }
 

@@ -34,11 +34,35 @@ struct Settings {
         get { d.string(forKey: "keyTarget").flatMap(KeyTargetMode.init(rawValue:)) ?? .pointer }
         nonmutating set { d.set(newValue.rawValue, forKey: "keyTarget") }
     }
-    var policy: RampPolicy { RampPolicy(dimmingStart: dimmingStart, backlightFloor: backlightFloor, dimmerFloor: 0.15) }
+    /// How dark software dimming goes at the bottom of the scale (1 = no dimming). Not 0: the overlay
+    /// sits above menus, so a fully black screen would hide the menu needed to undo it.
+    var dimmerFloor: Double {
+        get { d.object(forKey: "dimmerFloor") as? Double ?? 0.15 }
+        nonmutating set { d.set(newValue, forKey: "dimmerFloor") }
+    }
+    /// Slider response: 1 = linear, `RampPolicy.perceptualCurve` = finer steps at the dark end.
+    var curve: Double {
+        get { d.object(forKey: "curve") as? Double ?? 1 }
+        nonmutating set { d.set(newValue, forKey: "curve") }
+    }
+    /// Read DDC monitors now and then, so a change made with their buttons (or another app) moves
+    /// the slider and holds the schedule, as it does on Apple panels.
+    var followMonitorChanges: Bool {
+        get { d.object(forKey: "followMonitorChanges") as? Bool ?? true }
+        nonmutating set { d.set(newValue, forKey: "followMonitorChanges") }
+    }
+    var verifiesWrites: Bool {
+        get { d.object(forKey: "verifiesWrites") as? Bool ?? true }
+        nonmutating set { d.set(newValue, forKey: "verifiesWrites") }
+    }
+    var policy: RampPolicy {
+        RampPolicy(dimmingStart: dimmingStart, backlightFloor: backlightFloor, dimmerFloor: dimmerFloor, curve: curve)
+    }
     var tuning: BusTuning {
         var t = BusTuning()
         t.sendsPerValue = sendsPerValue
         t.settleMs = settleMs
+        t.verifiesWrites = verifiesWrites
         return t
     }
 }
@@ -115,6 +139,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// again until the app is reopened.
     private var codeChanged = false
     private var safetyPoll: Timer?
+    private var monitorPoll: Timer?
+    private let monitorPollSeconds: TimeInterval = 30
+    /// From sleep until the monitors are sent their levels again after wake: a read in between would
+    /// take the level a monitor woke at for a change made on it.
+    private var monitorPollPaused = false
+    /// Counts sleeps and wakes, so a post-wake step scheduled before the latest one is dropped.
+    private var wakeGeneration = 0
     private var terminationSignal: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -133,6 +164,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                            name: NSApplication.didChangeScreenParametersNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake),
                                                           name: NSWorkspace.didWakeNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(willSleep),
+                                                          name: NSWorkspace.willSleepNotification, object: nil)
+        // Display sleep while the Mac stays awake puts monitors in standby too.
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(willSleep),
+                                                          name: NSWorkspace.screensDidSleepNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(screensDidWake),
+                                                          name: NSWorkspace.screensDidWakeNotification, object: nil)
 
         // Keys act on an external display (active window's or pointer's); the built-in panel stays with macOS.
         keyTap.mode = settings.keyTarget
@@ -157,6 +195,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         scheduler.coordinators = { [unowned self] in coordinators }
         scheduler.start()
+        updateMonitorPoll()
+    }
+
+    // MARK: following DDC monitors
+
+    /// Following needs the read-back: without it, a write the monitor dropped would look like a
+    /// change made on it. Paused around sleep and wake.
+    private var monitorPollWanted: Bool {
+        settings.followMonitorChanges && settings.verifiesWrites && !monitorPollPaused
+    }
+
+    /// Reads each DDC monitor's backlight every 30 s while "Follow changes made on the monitor" is on.
+    private func updateMonitorPoll() {
+        let wanted = monitorPollWanted
+        if wanted, monitorPoll == nil {
+            let timer = Timer(timeInterval: monitorPollSeconds, repeats: true) { [unowned self] _ in pollMonitors() }
+            timer.tolerance = 5
+            RunLoop.main.add(timer, forMode: .common)
+            monitorPoll = timer
+        } else if !wanted {
+            monitorPoll?.invalidate()
+            monitorPoll = nil
+        }
+    }
+
+    /// A DDC level that moved away from ours was changed on the monitor or by another app: the
+    /// slider follows it and the schedule holds that display, like a change made here.
+    private func pollMonitors() {
+        guard monitorPollWanted else { return } // a menu click may land between a change and the timer's removal
+        for c in coordinators where c.backlight is BusBacklight {
+            c.resyncInBackground { [weak self, weak c] moved in
+                guard let self, let c, moved else { return }
+                log.info("\(c.name, privacy: .public) backlight was changed elsewhere; following it")
+                scheduler.userAdjusted(c.display)
+            }
+        }
     }
 
     // MARK: day schedule
@@ -331,15 +405,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        // A slider in the menu's first item draws without the filled part of its track (macOS 26),
+        // so the sliders start below a thin empty item.
+        let top = NSMenuItem()
+        top.view = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 4))
+        menu.addItem(top)
         for c in coordinators {
             if c.backlight is BuiltInBacklight { c.resync() }
             let item = NSMenuItem()
             let detail = c.backlight?.kind ?? "software dimming only"
-            item.view = SliderRow(title: "\(c.name) — \(detail)", value: c.brightness) { [weak self, weak c] v in
+            let row = SliderRow(title: "\(c.name) — \(detail)", value: c.brightness) { [weak self, weak c] v in
                 guard let c else { return }
                 c.set(brightness: v)
                 self?.scheduler.userAdjusted(c.display)
             }
+            item.view = row
             menu.addItem(item)
         }
         for c in coordinators {
@@ -357,25 +437,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let follow = ClosureMenuItem(title: "Adjust brightness through the day") { [unowned self] in scheduler.enabled.toggle() }
         follow.state = scheduler.enabled ? .on : .off
         menu.addItem(follow)
+        scheduler.refreshNow() // expired holds go, and the phase named below is the current one
         if scheduler.enabled, let until = scheduler.held.values.max() {
             let time = until.formatted(date: .omitted, time: .shortened)
             menu.addItem(ClosureMenuItem(title: "Resume schedule (holding your setting until \(time))") { [unowned self] in
                 scheduler.resume()
             })
+            let held = coordinators.filter { scheduler.held[$0.display] != nil }
+            for c in held {
+                guard let a = scheduler.adoption(c.display) else { continue }
+                let percent = Int((c.brightness * 100).rounded())
+                let level = Int((a.level * 100).rounded())
+                let whose = held.count > 1 ? "\(c.name)'s " : ""
+                // During a ramp the phase level that keeps the schedule at this brightness differs from it.
+                let title = level == percent
+                    ? "Use \(whose)\(percent)% as the \(a.phase.rawValue) level"
+                    : "Keep \(whose)\(percent)% in the schedule (\(a.phase.rawValue) level \(level)%)"
+                menu.addItem(ClosureMenuItem(title: title) { [unowned self] in scheduler.adopt(c.display, phase: a.phase) })
+            }
         }
         menu.addItem(ClosureMenuItem(title: "Day Schedule…") { [unowned self] in showScheduleWindow() })
         menu.addItem(.separator())
         // Tuning for unusual monitors; the defaults suit most setups, so it stays out of the way.
         let advanced = NSMenuItem(title: "Advanced", action: nil, keyEquivalent: "")
         let tuning = NSMenu()
+        tuning.autoenablesItems = false // so isEnabled below sticks
         tuning.addItem(choices("Software dimming below", [("Off", 0.0), ("20%", 0.2), ("30%", 0.3), ("40%", 0.4), ("50%", 0.5)],
                                current: settings.dimmingStart) { [unowned self] v in settings.dimmingStart = v; updatePolicy() })
+        tuning.addItem(choices("Slider response", [("Linear", 1.0), ("Finer at the dark end", RampPolicy.perceptualCurve)],
+                               current: settings.curve) { [unowned self] v in settings.curve = v; updatePolicy() })
+        tuning.addItem(choices("Darkest software dimming", [("15%", 0.15), ("10%", 0.1), ("5%", 0.05)],
+                               current: settings.dimmerFloor) { [unowned self] v in settings.dimmerFloor = v; updatePolicy() })
         tuning.addItem(choices("Backlight floor", [("0%", 0.0), ("10%", 0.1), ("20%", 0.2), ("30%", 0.3)],
                                current: settings.backlightFloor) { [unowned self] v in settings.backlightFloor = v; updatePolicy() })
         tuning.addItem(choices("DDC sends per change", [("Once", 1), ("Twice", 2)],
                                current: settings.sendsPerValue) { [unowned self] v in settings.sendsPerValue = v; updateTuning() })
         tuning.addItem(choices("DDC settle time", [("20 ms", 20), ("50 ms", 50), ("100 ms", 100)],
                                current: settings.settleMs) { [unowned self] v in settings.settleMs = v; updateTuning() })
+        tuning.addItem(.separator())
+        let verify = ClosureMenuItem(title: "Check that DDC changes took") { [unowned self] in
+            settings.verifiesWrites.toggle(); updateTuning(); updateMonitorPoll()
+        }
+        verify.state = settings.verifiesWrites ? .on : .off
+        tuning.addItem(verify)
+        let followMonitor = ClosureMenuItem(title: "Follow changes made on the monitor") { [unowned self] in
+            settings.followMonitorChanges.toggle(); updateMonitorPoll()
+        }
+        followMonitor.state = settings.followMonitorChanges && settings.verifiesWrites ? .on : .off
+        followMonitor.isEnabled = settings.verifiesWrites // needs the read-back to tell a dropped write apart
+        tuning.addItem(followMonitor)
         advanced.submenu = tuning
         let current: KeyTargetMode? = settings.brightnessKeys ? settings.keyTarget : nil
         menu.addItem(choices("Brightness keys control external display",
@@ -463,9 +573,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         scheduler.tick()
     }
 
+    /// Mac or display sleep: no reads until the monitors have been sent their levels after waking.
+    @objc private func willSleep() {
+        pauseMonitorPoll()
+    }
+
+    /// Stops the poll, drops reads in flight (they may finish after wake with its level), and
+    /// cancels a pending post-wake step.
+    private func pauseMonitorPoll() {
+        wakeGeneration += 1
+        monitorPollPaused = true
+        updateMonitorPoll()
+        coordinators.forEach { $0.dropReadsInProgress() }
+    }
+
     @objc private func didWake() {
         refreshDisplays(reprobe: true) // a monitor that was in standby may answer DDC now
         scheduler.tick()
+        afterMonitorsWake()
+    }
+
+    @objc private func screensDidWake() {
+        afterMonitorsWake()
+    }
+
+    /// Monitors can take a few seconds to listen again, and some wake at a level of their own.
+    /// Reading them before that level is replaced would follow it as a change made on the monitor.
+    private func afterMonitorsWake() {
+        pauseMonitorPoll() // also when no sleep notification came first
+        let generation = wakeGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, generation == wakeGeneration else { return } // slept or woke again since
+            coordinators.forEach { $0.reassert() }
+            monitorPollPaused = false
+            updateMonitorPoll()
+        }
     }
 }
 

@@ -236,6 +236,37 @@ import Foundation
         #expect(abs(plan.level(atMinute: 23.2 * 60, sun: summer) - 0.2) < 1e-9)
     }
 
+    @Test func adoptingOnAPlateauSetsThatPhaseOnly() {
+        let plan = DaySchedule(dayLevel: 0.86, eveningLevel: 0.36, nightLevel: 0.28)
+        let noon = plan.adopting(0.57, atMinute: 12 * 60, sun: sun)
+        #expect(noon.dayLevel == 0.57 && noon.eveningLevel == 0.36 && noon.nightLevel == 0.28)
+        let late = plan.adopting(0.1, atMinute: 2 * 60, sun: sun)
+        #expect(late.nightLevel == 0.1 && late.dayLevel == 0.86)
+    }
+
+    @Test func adoptingDuringARampKeepsTheCurveOnTheChosenLevel() {
+        let plan = DaySchedule(dayLevel: 0.86, eveningLevel: 0.36, nightLevel: 0.28)
+        for m in stride(from: sun.sunset - 25, through: sun.sunset + 25, by: 5) {
+            let adopted = plan.adopting(0.5, atMinute: m, sun: sun)
+            #expect(abs(adopted.level(atMinute: m, sun: sun) - 0.5) < 1e-9)
+        }
+    }
+
+    @Test func phaseLevelPaths() {
+        var plan = DaySchedule()
+        plan[keyPath: DaySchedule.level(of: .evening)] = 0.42
+        #expect(plan.eveningLevel == 0.42)
+        #expect(DaySchedule.level(of: .day) == \DaySchedule.dayLevel)
+        #expect(DaySchedule.level(of: .night) == \DaySchedule.nightLevel)
+    }
+
+    @Test func adoptingClampsAnUnreachableLevel() {
+        let plan = DaySchedule(dayLevel: 0.86, eveningLevel: 0.36, nightLevel: 0.28)
+        // Just past the start of the sunset ramp, Day still carries most of the weight but can't reach 0.
+        let adopted = plan.adopting(0, atMinute: sun.sunset + 20, sun: sun)
+        #expect(adopted.eveningLevel == 0 || adopted.dayLevel == 0)
+    }
+
     @Test func manualChangeHoldsUntilNextRamp() {
         // 12:00 → sunset ramp starts 16:30.
         #expect(plan.minutesUntilNextTransition(afterMinute: 12 * 60, sun: sun) == 4.5 * 60)
@@ -530,5 +561,266 @@ import Foundation
             #expect(setxattr(app.path, "dev.test", "x", 1, 0, 0) == 0) // like LaunchServices' last-used date
             #expect(w.isIntact)
         }
+    }
+}
+
+@Suite struct RampCurveTests {
+    let policies: [RampPolicy] = [
+        RampPolicy(dimmingStart: 0.3, backlightFloor: 0, dimmerFloor: 0.15, curve: RampPolicy.perceptualCurve),
+        RampPolicy(dimmingStart: 0.5, backlightFloor: 0.1, dimmerFloor: 0.05, curve: RampPolicy.perceptualCurve),
+        RampPolicy(dimmingStart: 0, backlightFloor: 0, dimmerFloor: 0.15, curve: RampPolicy.perceptualCurve), // no dimming
+        .softwareOnly(dimmerFloor: 0.1, curve: RampPolicy.perceptualCurve),                                   // no backlight
+    ]
+
+    @Test func linearIsTheDefault() {
+        #expect(RampPolicy().curve == 1)
+        let t = RampTable(policy: RampPolicy())
+        #expect(abs(t.levels(forBrightness: 0.65).backlight - 0.5) < 1e-9)
+    }
+
+    @Test func breakpointsAndEndsStayPut() {
+        for p in policies {
+            let t = RampTable(policy: p)
+            let linear = RampTable(policy: RampPolicy(dimmingStart: p.dimmingStart, backlightFloor: p.backlightFloor,
+                                                      dimmerFloor: p.dimmerFloor))
+            for b in [0, p.dimmingStart, 1] {
+                #expect(t.levels(forBrightness: b) == linear.levels(forBrightness: b))
+            }
+        }
+    }
+
+    @Test func curveGivesFinerStepsLowInEachPart() {
+        let t = RampTable(policy: policies[0])
+        // Measured on brightness²: 0.65 is (0.4225 − 0.09) / (1 − 0.09) of the backlight range.
+        #expect(abs(t.levels(forBrightness: 0.65).backlight - (0.4225 - 0.09) / 0.91) < 1e-9)
+        #expect(t.levels(forBrightness: 0.65).backlight < 0.5) // below linear
+        // Halfway through the dimming part: 0.15 + 0.85 × 0.5².
+        #expect(abs(t.levels(forBrightness: 0.15).dimmer - (0.15 + 0.85 * 0.25)) < 1e-9)
+    }
+
+    @Test func stepsDontFlattenAtTheHandOver() {
+        let t = RampTable(policy: policies[0])
+        // The first 1% above the hand-over still moves the backlight a fair amount.
+        #expect(t.levels(forBrightness: 0.31).backlight > 0.005)
+    }
+
+    @Test func monotonicAndRoundTripsInEveryMode() {
+        for p in policies {
+            let t = RampTable(policy: p)
+            var previous = t.levels(forBrightness: 0)
+            for i in 0...200 {
+                let b = Double(i) / 200
+                let l = t.levels(forBrightness: b)
+                #expect(l.backlight >= previous.backlight - 1e-12 && l.dimmer >= previous.dimmer - 1e-12)
+                previous = l
+                if p.dimmingStart == 0, b == 0 { continue } // backlight 0 with no dimming part is the same as b = 0
+                #expect(abs(t.brightness(for: l) - b) < 1e-9)
+            }
+        }
+    }
+
+    @Test func badCurveFallsBackToSaneRange() {
+        let t = RampTable(policy: RampPolicy(curve: .nan))
+        #expect(t.curve == 1)
+        #expect(RampTable(policy: RampPolicy(curve: 100)).curve == 4)
+    }
+}
+
+@Suite struct VCPWriteQueueTests {
+    /// A monitor on a fake bus. `drops` lists writes (by count) that it acknowledges but ignores.
+    final class FakeMonitor: @unchecked Sendable {
+        var values: [UInt8: UInt16] = [:]
+        var sent: [(UInt8, UInt16)] = []
+        var reads = 0
+        var drops: Set<Int> = []
+        var answers = true
+        var onPause: () -> Void = {}
+
+        var bus: VCPWriteQueue.Bus {
+            VCPWriteQueue.Bus(
+                send: { [self] code, value in
+                    sent.append((code, value))
+                    if !drops.contains(sent.count) { values[code] = value }
+                    return true
+                },
+                read: { [self] code in reads += 1; return answers ? values[code] : nil },
+                pause: { [self] in onPause() })
+        }
+    }
+
+    @Test func coalescesAndSkipsRepeats() {
+        let q = VCPWriteQueue()
+        let m = FakeMonitor()
+        #expect(q.enqueue(0x10, 40))
+        #expect(!q.enqueue(0x10, 50)) // replaces the pending 40; the running drain picks it up
+        #expect(!q.enqueue(0x62, 7))
+        q.drain(m.bus)
+        #expect(m.sent.map(\.1) == [50, 7])
+        #expect(q.enqueue(0x10, 50))
+        q.drain(m.bus)
+        #expect(m.sent.count == 2) // unchanged value skipped
+    }
+
+    @Test func resendsAWriteTheMonitorDropped() {
+        let q = VCPWriteQueue()
+        let m = FakeMonitor()
+        m.values[0x10] = 80
+        m.drops = [1]
+        var events: [VCPWriteQueue.Event] = []
+        _ = q.enqueue(0x10, 38)
+        q.drain(m.bus) { events.append($0) }
+        #expect(m.values[0x10] == 38)
+        #expect(events == [.resending(code: 0x10, reported: 80, value: 38)])
+        #expect(m.reads == 2)
+    }
+
+    @Test func resendGoesOutTwiceSoOneDropDoesNotDefeatIt() {
+        let q = VCPWriteQueue()
+        let m = FakeMonitor()
+        m.values[0x10] = 80
+        m.drops = [1, 2] // the first write and the first resend
+        var events: [VCPWriteQueue.Event] = []
+        _ = q.enqueue(0x10, 38)
+        q.drain(m.bus) { events.append($0) }
+        #expect(m.values[0x10] == 38 && m.sent.count == 3)
+        #expect(events == [.resending(code: 0x10, reported: 80, value: 38)])
+    }
+
+    @Test func reportsAValueTheMonitorRefuses() {
+        let q = VCPWriteQueue()
+        let m = FakeMonitor()
+        m.values[0x10] = 80
+        m.drops = [1, 2, 3]
+        var events: [VCPWriteQueue.Event] = []
+        _ = q.enqueue(0x10, 38)
+        q.drain(m.bus) { events.append($0) }
+        #expect(events.last == .notTaken(code: 0x10, reported: 80, value: 38))
+        // The refused value is tried again next time instead of being skipped as a repeat.
+        m.drops = []
+        _ = q.enqueue(0x10, 38)
+        q.drain(m.bus)
+        #expect(m.values[0x10] == 38)
+    }
+
+    @Test func remembersWhatTheMonitorKeptWhenItRefused() {
+        let q = VCPWriteQueue()
+        let m = FakeMonitor()
+        m.values[0x10] = 80
+        m.drops = [1, 2, 3]
+        _ = q.enqueue(0x10, 38)
+        q.drain(m.bus)
+        #expect(q.isUnconfirmed(0x10))
+        m.drops = []
+        _ = q.enqueue(0x10, 40)
+        q.drain(m.bus)
+        #expect(!q.isUnconfirmed(0x10))
+    }
+
+    @Test func failedSendIsNotOverwrittenByAnOlderCheck() {
+        let q = VCPWriteQueue(quietSteps: 1)
+        let m = FakeMonitor()
+        var failNext = false
+        var bus = m.bus
+        let send = bus.send
+        bus.send = { code, value in
+            if failNext { failNext = false; m.values[code] = value; return false } // applied, reply lost
+            return send(code, value)
+        }
+        var queued = false
+        bus.pause = { if !queued { queued = true; failNext = true; _ = q.enqueue(0x10, 60) } }
+        _ = q.enqueue(0x10, 50)
+        q.drain(bus)
+        #expect(m.values[0x10] == 60) // the check of 50 didn't put 50 back
+        #expect(q.isUnconfirmed(0x10))
+    }
+
+    @Test func failedResendLeavesTheCodeUnconfirmed() {
+        let q = VCPWriteQueue()
+        let m = FakeMonitor()
+        m.values[0x10] = 70
+        m.drops = [1]
+        var bus = m.bus
+        let send = bus.send
+        var sends = 0
+        bus.send = { code, value in sends += 1; return sends == 1 ? send(code, value) : false }
+        _ = q.enqueue(0x10, 40)
+        q.drain(bus)
+        #expect(q.isUnconfirmed(0x10))
+    }
+
+    @Test func failedWriteAfterForgetIsUnconfirmed() {
+        let q = VCPWriteQueue()
+        var bus = FakeMonitor().bus
+        bus.send = { _, _ in false }
+        q.forget(0x10)
+        _ = q.enqueue(0x10, 40)
+        q.drain(bus)
+        #expect(q.isUnconfirmed(0x10))
+    }
+
+    @Test func noAnswerIsNotAMismatch() {
+        let q = VCPWriteQueue()
+        let m = FakeMonitor()
+        m.answers = false
+        var events: [VCPWriteQueue.Event] = []
+        _ = q.enqueue(0x10, 38)
+        q.drain(m.bus) { events.append($0) }
+        #expect(events.isEmpty && m.sent.count == 1)
+        #expect(q.isUnconfirmed(0x10))
+    }
+
+    @Test func verifyingCanBeTurnedOff() {
+        let q = VCPWriteQueue(verifies: false)
+        let m = FakeMonitor()
+        m.drops = [1]
+        _ = q.enqueue(0x10, 38)
+        q.drain(m.bus)
+        #expect(m.reads == 0 && m.sent.count == 1)
+    }
+
+    @Test func readsBackOnlyTheLastValueOfADrag() {
+        let q = VCPWriteQueue(quietSteps: 3)
+        let m = FakeMonitor()
+        var more: [UInt16] = [41, 42, 43]
+        // While waiting for the writes to pause, the slider keeps moving.
+        m.onPause = { if !more.isEmpty { _ = q.enqueue(0x10, more.removeFirst()) } }
+        _ = q.enqueue(0x10, 40)
+        q.drain(m.bus)
+        #expect(m.sent.map(\.1) == [40, 41, 42, 43])
+        #expect(m.reads == 1)
+    }
+
+    @Test func forgetSendsTheSameValueAgain() {
+        let q = VCPWriteQueue()
+        let m = FakeMonitor()
+        _ = q.enqueue(0x10, 38)
+        q.drain(m.bus)
+        q.forget(0x10)
+        _ = q.enqueue(0x10, 38)
+        q.drain(m.bus)
+        #expect(m.sent.count == 2)
+    }
+
+    @Test func twoByteCodeMustMatchExactly() {
+        let q = VCPWriteQueue()
+        let m = FakeMonitor()
+        m.values[0x10] = 0x0132 // a luminance maximum above 255: 0x32 dropped, 0x132 still set
+        m.drops = [1]
+        var events: [VCPWriteQueue.Event] = []
+        _ = q.enqueue(0x10, 0x32)
+        q.drain(m.bus) { events.append($0) }
+        #expect(events == [.resending(code: 0x10, reported: 0x0132, value: 0x32)])
+        #expect(m.values[0x10] == 0x32)
+    }
+
+    @Test func singleByteCodeWithHighByteMatches() {
+        let q = VCPWriteQueue()
+        let m = FakeMonitor()
+        m.drops = [1]
+        m.values[0x8D] = 0x0201 // monitor reports a high byte alongside "muted" (1)
+        var events: [VCPWriteQueue.Event] = []
+        _ = q.enqueue(0x8D, 1)
+        q.drain(m.bus) { events.append($0) }
+        #expect(events.isEmpty)
     }
 }

@@ -29,8 +29,9 @@ if [[ -n "$pids" ]]; then
     [[ -n "$pids" ]] && kill -KILL $pids 2>/dev/null || true
 fi
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp .build/release/MonitorKeys "$app/Contents/MacOS/MonitorKeys"
+cp Resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns" # made by scripts/make-icon.sh
 
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -40,9 +41,10 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key><string>dev.ourapp.monitorkeys</string>
     <key>CFBundleName</key><string>MonitorKeys</string>
     <key>CFBundleExecutable</key><string>MonitorKeys</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.2.4</string>
-    <key>CFBundleVersion</key><string>6</string>
+    <key>CFBundleShortVersionString</key><string>0.3.0</string>
+    <key>CFBundleVersion</key><string>7</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
     <key>NSLocationUsageDescription</key><string>MonitorKeys uses your approximate location to work out sunrise and sunset for the day schedule.</string>

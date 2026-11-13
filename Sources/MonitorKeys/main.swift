@@ -3,7 +3,8 @@ import MonitorKeysCore
 
 /// `MonitorKeys --probe` lists displays and their channels and reads current levels. It writes nothing
 /// unless `--ddc-set <raw>` (luminance) or `--volume-set <raw>` (speaker volume) is also given,
-/// which writes that raw value to external monitors.
+/// which writes that raw value to external monitors. `--ddc-queue <raw>` writes luminance the way
+/// the app does: through the write queue, read back and sent again if the monitor didn't take it.
 func argument(_ flag: String) -> String? {
     guard let i = CommandLine.arguments.firstIndex(of: flag), i + 1 < CommandLine.arguments.count else { return nil }
     return CommandLine.arguments[i + 1]
@@ -25,6 +26,7 @@ if CommandLine.arguments.contains("--probe") {
             if let ms = ProcessInfo.processInfo.environment["MONITORKEYS_SETTLE_MS"].flatMap(Int.init) { tuning.settleMs = ms }
             if let n = ProcessInfo.processInfo.environment["MONITORKEYS_READ_SENDS"].flatMap(Int.init) { tuning.readRequestSends = n }
             if let n = ProcessInfo.processInfo.environment["MONITORKEYS_SENDS"].flatMap(Int.init) { tuning.sendsPerValue = n }
+            if let v = ProcessInfo.processInfo.environment["MONITORKEYS_VERIFY"] { tuning.verifiesWrites = v != "0" }
             let link = BusLink(endpoint: ep, tuning: tuning)
             if let bus = BusBacklight(link: link) {
                 print("    DDC luminance: max=\(bus.maximum) level=\(bus.read().map { String(format: "%.3f", $0) } ?? "unreadable")")
@@ -32,6 +34,14 @@ if CommandLine.arguments.contains("--probe") {
                     print("    write \(raw): \(link.writeNow(MCCS.Code.luminance, min(raw, bus.maximum)) ? "accepted" : "failed")")
                     usleep(100_000)
                     print("    read back: \(bus.read().map { String(format: "%.3f", $0) } ?? "unreadable")")
+                }
+                if let raw = argument("--ddc-queue").flatMap(UInt16.init) {
+                    let start = Date()
+                    let value = min(raw, bus.maximum)
+                    bus.rewrite(Double(value) / Double(bus.maximum)) // always sent, even after --ddc-set
+                    let level = bus.read() // waits for the queued write and its check
+                    print("    queued \(value), checked: \(tuning.verifiesWrites), read back after "
+                          + "\(Int(Date().timeIntervalSince(start) * 1000)) ms: \(level.map { String(format: "%.3f", $0) } ?? "unreadable")")
                 }
             } else {
                 print("    DDC endpoint found but luminance read failed → software dimming only")

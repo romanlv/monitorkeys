@@ -18,6 +18,8 @@ struct BusTuning: Equatable {
     var readRequestSends: Int = 2
     /// Wait between a read request and reading the reply. MCCS asks for at least 40 ms; slow monitors need more.
     var replyWaitMs: Int = 50
+    /// Read each value back once the writes pause, and send it again if the monitor didn't take it.
+    var verifiesWrites: Bool = true
 }
 
 /// One external monitor's DDC/CI endpoint, as found in the I/O registry. Owns a retain on the
