@@ -174,7 +174,9 @@ final class BusBacklight: BacklightChannel {
 final class BusSpeaker {
     let link: BusLink
     let maximum: UInt16
-    private(set) var model: SpeakerModel
+    private(set) var model: SpeakerModel {
+        didSet { if model != oldValue { NotificationCenter.default.post(name: .levelsChanged, object: self) } }
+    }
 
     /// Fails when the monitor does not report a speaker volume.
     init?(link: BusLink) {

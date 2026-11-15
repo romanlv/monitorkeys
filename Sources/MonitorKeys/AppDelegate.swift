@@ -147,6 +147,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Counts sleeps and wakes, so a post-wake step scheduled before the latest one is dropped.
     private var wakeGeneration = 0
     private var terminationSignal: DispatchSourceSignal?
+    /// The menu's sliders and mute items. They follow `.levelsChanged`, so a change made with the
+    /// keys or on the monitor shows while the menu is open.
+    private var liveRows: [SliderRow] = []
+    private var liveMutes: [(item: NSMenuItem, muted: () -> Bool?)] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         startSafetyChecks() // first, so the key tap is never up without them
@@ -162,6 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(screensChanged),
                            name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        center.addObserver(self, selector: #selector(refreshLevelControls), name: .levelsChanged, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake),
                                                           name: NSWorkspace.didWakeNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(willSleep),
@@ -403,8 +408,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: menu
 
+    @objc private func refreshLevelControls() {
+        liveRows.forEach { $0.refresh() }
+        for m in liveMutes {
+            if let muted = m.muted() { m.item.state = muted ? .on : .off }
+        }
+    }
+
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        liveRows = []
+        liveMutes = []
         // A slider in the menu's first item draws without the filled part of its track (macOS 26),
         // so the sliders start below a thin empty item.
         let top = NSMenuItem()
@@ -414,23 +428,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if c.backlight is BuiltInBacklight { c.resync() }
             let item = NSMenuItem()
             let detail = c.backlight?.kind ?? "software dimming only"
-            let row = SliderRow(title: "\(c.name) — \(detail)", value: c.brightness) { [weak self, weak c] v in
+            let row = SliderRow(title: "\(c.name) — \(detail)",
+                                value: { [weak c] in c?.brightness }) { [weak self, weak c] v in
                 guard let c else { return }
                 c.set(brightness: v)
                 self?.scheduler.userAdjusted(c.display)
             }
             item.view = row
+            liveRows.append(row)
             menu.addItem(item)
         }
         for c in coordinators {
             guard let speaker = c.speaker else { continue }
             let item = NSMenuItem()
-            item.view = SliderRow(title: "\(c.name) — speaker volume", value: speaker.volume) { [weak speaker] v in
+            let row = SliderRow(title: "\(c.name) — speaker volume",
+                                value: { [weak speaker] in speaker?.volume }) { [weak speaker] v in
                 speaker?.setVolume(v)
             }
+            item.view = row
+            liveRows.append(row)
             menu.addItem(item)
             let mute = ClosureMenuItem(title: "Mute \(c.name)") { [weak speaker] in speaker?.toggleMute() }
             mute.state = speaker.muted ? .on : .off
+            liveMutes.append((item: mute, muted: { [weak speaker] in speaker?.muted }))
             menu.addItem(mute)
         }
         menu.addItem(.separator())
@@ -623,23 +643,35 @@ final class ClosureMenuItem: NSMenuItem {
     @objc private func fire() { handler() }
 }
 
-/// A label above a continuous slider, for use inside a menu.
+/// A label above a continuous slider, for use inside a menu. `refresh()` moves the slider to the
+/// current value.
 final class SliderRow: NSView {
     private let onChange: (Double) -> Void
+    private let current: () -> Double?
+    private let slider: NSSlider
 
-    init(title: String, value: Double, onChange: @escaping (Double) -> Void) {
+    /// `value` reads the level to show, or nil if what it reads is gone.
+    init(title: String, value: @escaping () -> Double?, onChange: @escaping (Double) -> Void) {
         self.onChange = onChange
+        current = value
+        slider = NSSlider(value: value() ?? 0, minValue: 0, maxValue: 1, target: nil, action: nil)
         super.init(frame: NSRect(x: 0, y: 0, width: 300, height: 50))
         let label = NSTextField(labelWithString: title)
         label.font = .menuFont(ofSize: 12)
         label.textColor = .secondaryLabelColor
         label.frame = NSRect(x: 18, y: 28, width: 270, height: 16)
-        let slider = NSSlider(value: value, minValue: 0, maxValue: 1, target: self, action: #selector(moved(_:)))
+        slider.target = self
+        slider.action = #selector(moved(_:))
         slider.isContinuous = true
         slider.frame = NSRect(x: 16, y: 4, width: 270, height: 22)
         addSubview(label)
         addSubview(slider)
     }
     required init?(coder: NSCoder) { fatalError("unused") }
+
+    func refresh() {
+        if let v = current(), v != slider.doubleValue { slider.doubleValue = v }
+    }
+
     @objc private func moved(_ sender: NSSlider) { onChange(sender.doubleValue) }
 }

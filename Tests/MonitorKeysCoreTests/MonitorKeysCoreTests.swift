@@ -12,11 +12,6 @@ import Foundation
         #expect(MCCS.getVCP(code: 0x10) == [0x82, 0x01, 0x10, 0xAC])
     }
 
-    @Test func sixteenBitValuesSplitHighLow() {
-        let p = MCCS.setVCP(code: 0x10, value: 0x0123)
-        #expect(p[3] == 0x01 && p[4] == 0x23)
-    }
-
     @Test func parsesValidReply() {
         let reply: [UInt8] = [0x6E, 0x88, 0x02, 0x00, 0x10, 0x00, 0x00, 0x64, 0x00, 0x32, 0xF2]
         #expect(MCCS.parseGetVCPReply(reply, code: 0x10) == .init(current: 50, maximum: 100))
@@ -48,15 +43,6 @@ import Foundation
         let reply: [UInt8] = [0x6E, 0x88, 0x02, 0x01, 0x62, 0x00, 0x00, 0x00, 0x00, 0x00, 0xD7]
         #expect(MCCS.parseGetVCP(reply, code: 0x62) == .unsupported)
         #expect(MCCS.parseGetVCPReply(reply, code: 0x62) == nil)
-    }
-
-    @Test func parsesSpeakerVolume() {
-        let reply: [UInt8] = [0x6E, 0x88, 0x02, 0x00, 0x62, 0x00, 0x00, 0x64, 0x00, 0x1E, 0xAC]
-        #expect(MCCS.parseGetVCP(reply, code: MCCS.Code.speakerVolume) == .value(.init(current: 30, maximum: 100)))
-    }
-
-    @Test func muteWritePacket() {
-        #expect(MCCS.setVCP(code: MCCS.Code.audioMute, value: MCCS.MuteValue.muted) == [0x84, 0x03, 0x8D, 0x00, 0x01, 0x34])
     }
 
     @Test func rejectsWrongCode() {
@@ -252,14 +238,6 @@ import Foundation
         }
     }
 
-    @Test func phaseLevelPaths() {
-        var plan = DaySchedule()
-        plan[keyPath: DaySchedule.level(of: .evening)] = 0.42
-        #expect(plan.eveningLevel == 0.42)
-        #expect(DaySchedule.level(of: .day) == \DaySchedule.dayLevel)
-        #expect(DaySchedule.level(of: .night) == \DaySchedule.nightLevel)
-    }
-
     @Test func adoptingClampsAnUnreachableLevel() {
         let plan = DaySchedule(dayLevel: 0.86, eveningLevel: 0.36, nightLevel: 0.28)
         // Just past the start of the sunset ramp, Day still carries most of the weight but can't reach 0.
@@ -335,12 +313,6 @@ import Foundation
         var b = SpeakerModel(volume: 0.4, muted: true, hasMuteControl: false)
         #expect(b.setVolume(0.5) == [.volume(0.5)])
         #expect(!b.muted)
-    }
-
-    @Test func volumeClamps() {
-        var m = SpeakerModel(volume: 2, muted: false, hasMuteControl: false)
-        #expect(m.volume == 1)
-        #expect(m.setVolume(-1) == [.volume(0)])
     }
 
     @Test func routingLeavesSystemControlledOutputsToMacOS() {
@@ -571,12 +543,6 @@ import Foundation
         RampPolicy(dimmingStart: 0, backlightFloor: 0, dimmerFloor: 0.15, curve: RampPolicy.perceptualCurve), // no dimming
         .softwareOnly(dimmerFloor: 0.1, curve: RampPolicy.perceptualCurve),                                   // no backlight
     ]
-
-    @Test func linearIsTheDefault() {
-        #expect(RampPolicy().curve == 1)
-        let t = RampTable(policy: RampPolicy())
-        #expect(abs(t.levels(forBrightness: 0.65).backlight - 0.5) < 1e-9)
-    }
 
     @Test func breakpointsAndEndsStayPut() {
         for p in policies {

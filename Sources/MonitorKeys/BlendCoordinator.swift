@@ -2,6 +2,12 @@ import CoreGraphics
 import Foundation
 import MonitorKeysCore
 
+extension Notification.Name {
+    /// Posted on the main thread when a display's brightness or its speaker's volume or mute changes,
+    /// whatever changed it. The object is the `BlendCoordinator` or `BusSpeaker`.
+    static let levelsChanged = Notification.Name("MonitorKeysLevelsChanged")
+}
+
 /// Owns one display: turns a brightness value into backlight + dimmer writes, and only writes a channel
 /// whose level actually changed.
 final class BlendCoordinator {
@@ -22,7 +28,9 @@ final class BlendCoordinator {
     private var reading = false
     /// An unconfirmed write was sent once more; if that doesn't take either, the monitor's level stands.
     private var retriedUnconfirmed = false
-    private(set) var brightness: Double
+    private(set) var brightness: Double {
+        didSet { if brightness != oldValue { NotificationCenter.default.post(name: .levelsChanged, object: self) } }
+    }
 
     var policy: RampPolicy {
         didSet {
