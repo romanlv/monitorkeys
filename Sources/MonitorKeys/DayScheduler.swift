@@ -14,8 +14,21 @@ struct Place: Codable, Equatable {
 /// that display where you put it until the next ramp starts (sunrise, sunset, bedtime, wake-up).
 @Observable
 final class DayScheduler {
-    var enabled: Bool { didSet { save(); held.removeAll(); scheduled.removeAll(); tick(immediate: true) } }
-    var plan: DaySchedule { didSet { save(); held.removeAll(); scheduled.removeAll(); tick(immediate: true) } }
+    // SwiftUI controls can write back a value unchanged; only a real change ends the holds.
+    var enabled: Bool {
+        didSet {
+            guard enabled != oldValue else { return }
+            log.notice("schedule turned \(self.enabled ? "on" : "off", privacy: .public)")
+            restart()
+        }
+    }
+    var plan: DaySchedule {
+        didSet {
+            guard plan != oldValue else { return }
+            log.notice("schedule changed: \(String(describing: self.plan), privacy: .public)")
+            restart()
+        }
+    }
     var place: Place? { didSet { save(); tick(immediate: true) } }
     var includeBuiltIn: Bool { didSet { save(); tick(immediate: true) } }
     /// Displays a manual change is holding, and until when.
@@ -39,6 +52,14 @@ final class DayScheduler {
         includeBuiltIn = defaults.bool(forKey: "schedule.includeBuiltIn")
         plan = Self.decode(DaySchedule.self, defaults.data(forKey: "schedule.plan")) ?? DaySchedule()
         place = Self.decode(Place.self, defaults.data(forKey: "schedule.place"))
+    }
+
+    /// After the plan or the on/off switch changed: every hold ends and each display goes to the new level.
+    private func restart() {
+        save()
+        held.removeAll()
+        scheduled.removeAll()
+        tick(immediate: true)
     }
 
     func start() {
@@ -80,7 +101,11 @@ final class DayScheduler {
         guard enabled else { return }
         let date = Date()
         let minutes = plan.minutesUntilNextTransition(afterMinute: Self.minuteOfDay(date), sun: sun(on: date))
-        held[display] = date.addingTimeInterval(minutes * 60)
+        let until = date.addingTimeInterval(minutes * 60)
+        if held[display] == nil {
+            log.notice("display \(display) changed by hand; schedule holds it until \(until.formatted(date: .omitted, time: .shortened), privacy: .public)")
+        }
+        held[display] = until
         scheduled[display] = nil
     }
 
@@ -109,11 +134,15 @@ final class DayScheduler {
     /// Brings `now` (and so `phaseNow`) up to date and drops expired holds, without moving any display.
     func refreshNow() {
         now = Date()
-        held = held.filter { $0.value > now }
+        for (display, until) in held where until <= now {
+            log.notice("hold on display \(display) ended; schedule resumes")
+            held[display] = nil
+        }
     }
 
     /// Ends the hold on one display, or on all of them.
     func resume(_ display: CGDirectDisplayID? = nil) {
+        log.notice("schedule resumed by hand for \(display.map { "display \($0)" } ?? "all displays", privacy: .public)")
         if let display { held[display] = nil } else { held.removeAll() }
         tick()
     }
@@ -132,11 +161,15 @@ final class DayScheduler {
             guard held[c.display] == nil else { continue }
             let delta = target - c.brightness
             if abs(delta) > 0.002 {
-                c.set(brightness: immediate ? target : c.brightness + min(max(delta, -maxStep), maxStep))
+                let from = c.brightness
+                c.set(brightness: immediate ? target : from + min(max(delta, -maxStep), maxStep))
+                log.notice("schedule moves \(c.name, privacy: .public) \(Self.percent(from), privacy: .public) → \(Self.percent(c.brightness), privacy: .public) (target \(Self.percent(target), privacy: .public), \(self.phaseNow.rawValue, privacy: .public))")
             }
             scheduled[c.display] = c.brightness
         }
     }
+
+    private static func percent(_ v: Double) -> String { String(format: "%.1f%%", v * 100) }
 
     // MARK: persistence
 

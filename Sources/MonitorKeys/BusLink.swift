@@ -2,6 +2,11 @@ import Foundation
 import IOKit
 import MonitorKeysCore
 
+extension Notification.Name {
+    /// Posted on the main thread when a DDC write could not be delivered. The object is the `BusLink`.
+    static let busWriteFailed = Notification.Name("MonitorKeysBusWriteFailed")
+}
+
 /// One external monitor's DDC/CI connection. Every control on that monitor (backlight, speaker)
 /// goes through the same link, so bus transactions never overlap. Writes go through a
 /// `VCPWriteQueue`: coalesced per code, repeats skipped, and read back once they pause.
@@ -80,8 +85,9 @@ final class BusLink {
             switch event {
             case .writeFailed(let code, let value):
                 log.error("DDC write of \(value) to VCP \(code) failed after retries")
+                DispatchQueue.main.async { NotificationCenter.default.post(name: .busWriteFailed, object: self) }
             case .resending(let code, let reported, let value):
-                log.info("monitor reports \(reported) for VCP \(code) after a write of \(value); sending again")
+                log.notice("monitor reports \(reported) for VCP \(code) after a write of \(value); sending again")
             case .notTaken(let code, let reported, let value):
                 log.error("monitor keeps reporting \(reported) for VCP \(code) after writes of \(value)")
             }

@@ -82,6 +82,24 @@ enum BusLocator {
         return found
     }
 
+    /// Registry IDs of the external DDC services that exist now; nil if the registry can't be read.
+    /// A monitor that drops off the link and comes back (deep standby, a cable hiccup) gets a new
+    /// service, and the old one stops working.
+    static func liveBusIDs() -> Set<UInt64>? {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("DCPAVServiceProxy"),
+                                           &iterator) == KERN_SUCCESS else { return nil }
+        defer { IOObjectRelease(iterator) }
+        var ids = Set<UInt64>()
+        while case let entry = IOIteratorNext(iterator), entry != 0 {
+            defer { IOObjectRelease(entry) }
+            guard property(entry, "Location") as? String == "External" else { continue }
+            var id: UInt64 = 0
+            if IORegistryEntryGetRegistryEntryID(entry, &id) == KERN_SUCCESS { ids.insert(id) }
+        }
+        return ids
+    }
+
     /// Pairs external displays with endpoints, each endpoint used at most once: exact
     /// vendor/model/serial first, then vendor/model in registry order, then, if exactly one display
     /// and one endpoint are left, those two.

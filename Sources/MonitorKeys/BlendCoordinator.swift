@@ -19,6 +19,9 @@ final class BlendCoordinator {
     /// Software dimming below the backlight's floor. A replacement coordinator for the same display
     /// takes it over and starts from its level.
     let shade: Shade
+    /// Registry ID of the DDC service matched to this display, even one that didn't answer (so it
+    /// isn't handed to another display); nil for Apple panels and when none was found.
+    let busID: UInt64?
     private var table: RampTable
     private var written: ChannelLevels
     /// Bumped by every backlight write and by `dropReadsInProgress`; a background read that started
@@ -45,11 +48,12 @@ final class BlendCoordinator {
     /// Starts from what the hardware reports now, so creating a coordinator writes nothing.
     /// `shade` is the dimming overlay of the coordinator this one replaces for the same display, if any.
     init(display: CGDirectDisplayID, name: String, backlight: BacklightChannel?, speaker: BusSpeaker? = nil,
-         policy: RampPolicy, shade: Shade? = nil) {
+         busID: UInt64? = nil, policy: RampPolicy, shade: Shade? = nil) {
         self.display = display
         self.name = name
         self.backlight = backlight
         self.speaker = speaker
+        self.busID = busID
         self.shade = shade ?? Shade(display: display)
         self.policy = policy
         let table = RampTable(policy: Self.effective(policy, backlight: backlight))
@@ -62,8 +66,6 @@ final class BlendCoordinator {
     /// An external display that has no backlight channel yet; worth probing for DDC again.
     var needsProbe: Bool { backlight == nil && CGDisplayIsBuiltin(display) == 0 }
 
-    /// The DDC bus this display's channels use, if any.
-    var busID: UInt64? { (backlight as? BusBacklight)?.link.registryID ?? speaker?.link.registryID }
 
     func set(brightness value: Double) {
         brightness = min(max(value, 0), 1)
@@ -125,6 +127,7 @@ final class BlendCoordinator {
             }
             retriedUnconfirmed = false
             bus.confirm()
+            log.notice("\(self.name, privacy: .public) didn't take backlight \(self.written.backlight, privacy: .public); showing its level \(level, privacy: .public)")
             written.backlight = level
             brightness = table.brightness(for: written)
             return false

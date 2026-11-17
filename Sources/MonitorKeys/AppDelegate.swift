@@ -82,6 +82,15 @@ enum DisplayInventory {
         return Array(ids.prefix(Int(count))).filter { CGDisplayMirrorsDisplay($0) == kCGNullDirectDisplay }
     }
 
+    /// Displays whose DDC service is gone while one not matched to any display is there: the monitor
+    /// dropped off the link (deep standby, a cable hiccup) and came back on a new service, and every
+    /// write through the old one fails. Until the new service shows up there is nothing to switch to.
+    static func reconnectable(_ coordinators: [BlendCoordinator]) -> Set<CGDirectDisplayID> {
+        guard let live = BusLocator.liveBusIDs(),
+              !live.isSubset(of: Set(coordinators.compactMap(\.busID))) else { return [] }
+        return Set(coordinators.filter { $0.busID.map { !live.contains($0) } ?? false }.map(\.display))
+    }
+
     static func name(of id: CGDirectDisplayID) -> String {
         NSScreen.forDisplay(id)?.localizedName ?? "Display \(id)"
     }
@@ -89,18 +98,21 @@ enum DisplayInventory {
     /// One coordinator per online display, each with the best backlight channel available.
     ///
     /// Coordinators in `keeping` whose display is still online are reused as they are, so a working
-    /// DDC channel is not re-created (and not raced) on every hot-plug. External displays that ended
-    /// up with software dimming only are probed again (the monitor may have been in standby), and
-    /// the replacement continues at the same brightness.
-    static func coordinators(settings: Settings, keeping: [BlendCoordinator] = [],
-                             reprobe: Bool = false) -> [BlendCoordinator] {
+    /// DDC channel is not re-created (and not raced) on every hot-plug. Those in `reconnect` (see
+    /// `reconnectable`) are replaced once their monitor answers on its new service, and so, with
+    /// `reprobe`, are external displays that ended up with software dimming only (the monitor may
+    /// have been in standby). A replacement continues at the same brightness.
+    static func coordinators(settings: Settings, keeping: [BlendCoordinator] = [], reprobe: Bool = false,
+                             reconnect: Set<CGDirectDisplayID> = []) -> [BlendCoordinator] {
         let ids = online()
-        let reusable = keeping.filter { ids.contains($0.display) && !(reprobe && $0.needsProbe) }
+        let reusable = keeping.filter {
+            ids.contains($0.display) && !(reprobe && $0.needsProbe) && !reconnect.contains($0.display)
+        }
         let kept = Dictionary(uniqueKeysWithValues: reusable.map { ($0.display, $0) })
         let previous = Dictionary(uniqueKeysWithValues: keeping.map { ($0.display, $0) })
         let needed = ids.filter { kept[$0] == nil }
 
-        // Buses already driven by a kept channel are off the table for the new ones.
+        // Buses already matched to a kept display are off the table for the new ones.
         let inUse = Set(reusable.compactMap(\.busID))
         let neededExternal = needed.filter { CGDisplayIsBuiltin($0) == 0 }
         let assigned = neededExternal.isEmpty ? [:] : BusLocator.assign(
@@ -110,15 +122,19 @@ enum DisplayInventory {
             if let c = kept[id] { return c }
             var backlight: BacklightChannel? = BuiltInBacklight(display: id)
             var speaker: BusSpeaker?
+            var busID: UInt64?
             if backlight == nil, CGDisplayIsBuiltin(id) == 0, let ep = assigned[id] {
                 let link = BusLink(endpoint: ep, tuning: settings.tuning)
                 backlight = BusBacklight(link: link)
                 speaker = BusSpeaker(link: link)
+                busID = ep.registryID
             }
-            // A replacement takes over its predecessor's dimming overlay.
             let old = previous[id]
+            // A monitor can be back on the link before it answers DDC: try again on the next refresh.
+            if let old, reconnect.contains(id), backlight == nil { return old }
+            // A replacement takes over its predecessor's dimming overlay.
             let c = BlendCoordinator(display: id, name: name(of: id), backlight: backlight, speaker: speaker,
-                                     policy: settings.policy, shade: old?.shade)
+                                     busID: busID, policy: settings.policy, shade: old?.shade)
             if let old { c.set(brightness: old.brightness) }
             return c
         }
@@ -167,6 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         center.addObserver(self, selector: #selector(screensChanged),
                            name: NSApplication.didChangeScreenParametersNotification, object: nil)
         center.addObserver(self, selector: #selector(refreshLevelControls), name: .levelsChanged, object: nil)
+        center.addObserver(self, selector: #selector(busWriteFailed), name: .busWriteFailed, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake),
                                                           name: NSWorkspace.didWakeNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(willSleep),
@@ -183,6 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             CGDisplayIsBuiltin(id) == 0 ? coordinators.first { $0.display == id } : nil
         }
         keyTap.onChange = { [unowned self] c in
+            log.notice("keys set \(c.name, privacy: .public) to \(String(format: "%.1f%%", c.brightness * 100), privacy: .public)")
             scheduler.userAdjusted(c.display)
             hud.show(level: c.brightness, on: c.display)
         }
@@ -229,10 +247,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// slider follows it and the schedule holds that display, like a change made here.
     private func pollMonitors() {
         guard monitorPollWanted else { return } // a menu click may land between a change and the timer's removal
+        // A monitor may have come back on a new DDC service without a screen change. (With following
+        // off, the next failed write finds it instead.)
+        refreshDisplays()
         for c in coordinators where c.backlight is BusBacklight {
             c.resyncInBackground { [weak self, weak c] moved in
                 guard let self, let c, moved else { return }
-                log.info("\(c.name, privacy: .public) backlight was changed elsewhere; following it")
+                log.notice("\(c.name, privacy: .public) backlight was changed elsewhere; following it at \(String(format: "%.1f%%", c.brightness * 100), privacy: .public)")
                 scheduler.userAdjusted(c.display)
             }
         }
@@ -577,15 +598,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .forEach { $0.tuning = settings.tuning }
     }
 
-    /// Adds coordinators for new displays, drops those for removed ones, and keeps the rest as they
-    /// are. With `reprobe` (wake, "Re-read hardware levels"), external displays without a DDC channel
-    /// are probed again; that costs a registry walk and DDC reads, so it is not done on every
-    /// screen-parameter change.
+    /// Adds coordinators for new displays, drops those for removed ones, reconnects those whose
+    /// monitor came back on a new DDC service, and keeps the rest as they are. With `reprobe` (wake,
+    /// "Re-read hardware levels"), external displays without a DDC channel are probed again; that
+    /// costs a registry walk and DDC reads, so it is not done on every screen-parameter change.
     private func refreshDisplays(reprobe: Bool = false) {
         let changed = Set(DisplayInventory.online()) != Set(coordinators.map(\.display))
-        if changed || (reprobe && coordinators.contains(where: \.needsProbe)) {
-            coordinators = DisplayInventory.coordinators(settings: settings, keeping: coordinators, reprobe: reprobe)
+        let reconnect = DisplayInventory.reconnectable(coordinators)
+        if !reconnect.isEmpty { log.notice("a monitor's DDC connection was replaced; reconnecting") }
+        if changed || !reconnect.isEmpty || (reprobe && coordinators.contains(where: \.needsProbe)) {
+            coordinators = DisplayInventory.coordinators(settings: settings, keeping: coordinators,
+                                                         reprobe: reprobe, reconnect: reconnect)
+            log.notice("displays set up again: \(self.coordinators.map { "\($0.name) (\($0.display), \($0.backlight?.kind ?? "software only"), \(String(format: "%.1f%%", $0.brightness * 100)))" }.joined(separator: ", "), privacy: .public)")
         }
+    }
+
+    /// The monitor may have dropped off the link and come back on a new DDC service.
+    @objc private func busWriteFailed() {
+        refreshDisplays()
     }
 
     @objc private func screensChanged() {
@@ -624,6 +654,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let generation = wakeGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
             guard let self, generation == wakeGeneration else { return } // slept or woke again since
+            log.notice("monitors awake: sending their levels again")
             coordinators.forEach { $0.reassert() }
             monitorPollPaused = false
             updateMonitorPoll()
